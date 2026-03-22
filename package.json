@@ -1,6 +1,6 @@
 {
   "name": "openterm",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "AI-Driven SSH Connection Manager",
   "main": "./out/main/index.js",
   "scripts": {
