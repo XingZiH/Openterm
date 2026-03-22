@@ -6,8 +6,7 @@
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",
-    "preview": "electron-vite preview",
-    "postinstall": "electron-builder install-app-deps"
+    "preview": "electron-vite preview"
   },
   "dependencies": {
     "electron-store": "^10.0.1",
@@ -37,6 +36,7 @@
     "vite": "^6.0.0"
   },
   "build": {
+    "npmRebuild": false,
     "appId": "com.openterm.app",
     "productName": "OpenTerm",
     "mac": {

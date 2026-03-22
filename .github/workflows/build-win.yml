@@ -17,6 +17,10 @@ jobs:
         node-version: 18
 
     - name: Install Dependencies
+      env:
+        npm_config_runtime: electron
+        npm_config_target: 35.7.5
+        npm_config_disturl: https://electronjs.org/headers
       run: npm install
 
     - name: Build Windows App
