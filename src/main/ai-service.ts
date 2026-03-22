@@ -24,7 +24,7 @@ export interface AiMessage {
   agentId?: string         // 产生此消息的 Agent
 }
 
-export type AiProvider = 'openai' | 'anthropic' | 'ollama' | 'custom'
+export type AiProvider = 'openai' | 'anthropic' | 'ollama' | 'custom' | 'deepseek' | 'kimi' | 'qwen' | 'gemini' | 'groq' | 'xai' | 'custom-anthropic'
 
 export interface AiSettings {
   provider: AiProvider
@@ -33,6 +33,11 @@ export interface AiSettings {
   model: string
   ollamaUrl?: string
   customPrompt?: string
+  temperature?: number
+  maxTokens?: number
+  topP?: number
+  profiles?: Record<string, any>
+  activeProfile?: string
 }
 
 // 重试配置
@@ -51,24 +56,48 @@ export class AiService {
   }
 
   /**
+   * 测试连接是否正常
+   * 通过发送一个极简请求来验证 API Key 和 URL 是否可用
+   */
+  async testConnection(settings: AiSettings): Promise<boolean> {
+    try {
+      // 构造极简请求，仅要求返回 1 个 token 即可验证鉴权和连通性
+      const testSettings = { ...settings, maxTokens: 1, temperature: 0 }
+      const testMsg: AiMessage[] = [{ role: 'user', content: 'Hi' }]
+      
+      const agent = this.agentManager.getDefaultAgent()
+      const systemPrompt = settings.customPrompt || agent.systemPrompt
+      const fullMessages: Array<{ role: string; content: string }> = [
+        { role: 'system', content: systemPrompt },
+        ...testMsg.map(m => ({ role: m.role, content: m.content }))
+      ]
+
+      await this.rawChat(fullMessages as AiMessage[], testSettings)
+      return true
+    } catch (err: any) {
+      throw new Error(`连接失败: ${err.message}`)
+    }
+  }
+
+  /**
    * 完整的对话处理流程（非流式）
    * 集成 Agent + Token 管理 + 自动压缩
    */
   async chat(
-    messages: AiMessage[],
+    messages: Omit<AiMessage, 'id'>[],
     settings: AiSettings,
-    options?: {
-      agentId?: string
-      terminalContext?: string
-    }
+    options?: { agentId?: string; terminalContext?: string; sessionId?: string }
   ): Promise<string> {
     const agentId = options?.agentId || 'ops'
     const agent = this.agentManager.getAgent(agentId) || this.agentManager.getDefaultAgent()
 
     // 构建 system prompt
-    const systemPrompt = options?.terminalContext
-      ? this.agentManager.buildSystemPrompt(agentId, options.terminalContext)
-      : (settings.customPrompt || agent.systemPrompt)
+    const systemPrompt = this.agentManager.buildSystemPrompt(
+      agentId,
+      options?.terminalContext,
+      options?.sessionId,
+      settings.customPrompt
+    )
 
     const fullMessages: Array<{ role: string; content: string }> = [
       { role: 'system', content: systemPrompt },
@@ -111,14 +140,18 @@ export class AiService {
     options?: {
       agentId?: string
       terminalContext?: string
+      sessionId?: string
     }
   ): Promise<void> {
     const agentId = options?.agentId || 'ops'
     const agent = this.agentManager.getAgent(agentId) || this.agentManager.getDefaultAgent()
 
-    const systemPrompt = options?.terminalContext
-      ? this.agentManager.buildSystemPrompt(agentId, options.terminalContext)
-      : (settings.customPrompt || agent.systemPrompt)
+    const systemPrompt = this.agentManager.buildSystemPrompt(
+      agentId,
+      options?.terminalContext,
+      options?.sessionId,
+      settings.customPrompt
+    )
 
     let chatMessages = messages
 
@@ -224,11 +257,18 @@ export class AiService {
   private async rawChat(messages: AiMessage[], settings: AiSettings): Promise<string> {
     switch (settings.provider) {
       case 'anthropic':
+      case 'custom-anthropic':
         return this.chatAnthropic(messages, settings)
       case 'ollama':
         return this.chatOllama(messages, settings)
       case 'custom':
       case 'openai':
+      case 'deepseek':
+      case 'kimi':
+      case 'qwen':
+      case 'gemini':
+      case 'groq':
+      case 'xai':
       default:
         return this.chatOpenAICompat(messages, settings)
     }
@@ -246,22 +286,48 @@ export class AiService {
   ): Promise<void> {
     switch (settings.provider) {
       case 'anthropic':
+      case 'custom-anthropic':
         return this.streamAnthropic(messages, settings, window, streamId)
       case 'ollama':
         return this.streamOllama(messages, settings, window, streamId)
       case 'custom':
       case 'openai':
+      case 'deepseek':
+      case 'kimi':
+      case 'qwen':
+      case 'gemini':
+      case 'groq':
+      case 'xai':
       default:
         return this.streamOpenAICompat(messages, settings, window, streamId)
     }
   }
 
+  // --- 辅助方法：修复 API URL ---
+  private resolveApiUrl(apiUrl: string | undefined): string {
+    const url = apiUrl || 'https://api.openai.com/v1/chat/completions'
+    // 如果用户只填了 baseURL (例如 https://ai.qaq.al/v1)，像 OpenCode 和 OpenAI SDK 一样自动补充 '/chat/completions'
+    if (url.endsWith('/v1')) {
+      return url + '/chat/completions'
+    }
+    if (url.endsWith('/v1/')) {
+      return url + 'chat/completions'
+    }
+    // 如果是个普通域名没有路径，也尽量补齐（除非明确包含了别的路径）
+    try {
+      const parsed = new URL(url)
+      if (parsed.pathname === '/' || parsed.pathname === '') {
+        return url.replace(/\/$/, '') + '/v1/chat/completions'
+      }
+    } catch {
+      // ignore parse err
+    }
+    return url
+  }
+
   // --- OpenAI Compatible (non-streaming) ---
   private async chatOpenAICompat(messages: AiMessage[], settings: AiSettings): Promise<string> {
-    const defaultUrl = settings.provider === 'custom'
-      ? (settings.apiUrl || '')
-      : 'https://api.openai.com/v1/chat/completions'
-    const url = settings.apiUrl || defaultUrl
+    const url = this.resolveApiUrl(settings.apiUrl)
 
     if (!url) throw new Error('请配置 API URL')
 
@@ -276,8 +342,9 @@ export class AiService {
       body: JSON.stringify({
         model: settings.model || 'gpt-4o-mini',
         messages: messages.map(m => ({ role: m.role, content: m.content })),
-        temperature: 0.7,
-        max_tokens: 4096
+        temperature: settings.temperature ?? 0.7,
+        max_tokens: settings.maxTokens ?? 4096,
+        top_p: settings.topP ?? 1
       })
     })
 
@@ -286,8 +353,15 @@ export class AiService {
       throw new Error(`API error: ${response.status} - ${errorText}`)
     }
 
-    const data = await response.json()
-    return data.choices?.[0]?.message?.content || ''
+    let data
+    try {
+      data = await response.json()
+    } catch (e) {
+      const text = await response.text().catch(() => '')
+      throw new Error(`API 返回了非 JSON 格式的数据。请检查 API 地址是否填写正确。返回内容前缀: ${text.slice(0, 100)}`)
+    }
+    
+    return data?.choices?.[0]?.message?.content || ''
   }
 
   // --- OpenAI Compatible (streaming) ---
@@ -297,10 +371,7 @@ export class AiService {
     window: BrowserWindow,
     streamId: string
   ): Promise<void> {
-    const defaultUrl = settings.provider === 'custom'
-      ? (settings.apiUrl || '')
-      : 'https://api.openai.com/v1/chat/completions'
-    const url = settings.apiUrl || defaultUrl
+    const url = this.resolveApiUrl(settings.apiUrl)
 
     if (!url) throw new Error('请配置 API URL')
 
@@ -309,17 +380,29 @@ export class AiService {
       headers['Authorization'] = `Bearer ${settings.apiKey}`
     }
 
-    const response = await fetch(url, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        model: settings.model || 'gpt-4o-mini',
-        messages: messages.map(m => ({ role: m.role, content: m.content })),
-        temperature: 0.7,
-        max_tokens: 4096,
-        stream: true
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(new Error('请求连接超时，请检查网络代理或 API 地址是否正确。')), 15000)
+
+    let response: Response
+    try {
+      response = await fetch(url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          model: settings.model || 'gpt-4o-mini',
+          messages: messages.map(m => ({ role: m.role, content: m.content })),
+          temperature: settings.temperature ?? 0.7,
+          max_tokens: settings.maxTokens ?? 4096,
+          top_p: settings.topP ?? 1,
+          stream: true
+        }),
+        signal: controller.signal as RequestInit['signal']
       })
-    })
+      clearTimeout(timeoutId)
+    } catch (err: any) {
+      clearTimeout(timeoutId)
+      throw new Error(`网络请求失败: ${err.message}`)
+    }
 
     if (!response.ok) {
       const errorText = await response.text()
@@ -330,40 +413,43 @@ export class AiService {
 
     const reader = response.body.getReader()
     const decoder = new TextDecoder()
-    let buffer = ''
 
-    try {
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
+    // 独立进行后台流式读取，不阻塞当前 IPC 调用返回
+    ;(async () => {
+      let buffer = ''
+      try {
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
 
-        buffer += decoder.decode(value, { stream: true })
-        const lines = buffer.split('\n')
-        buffer = lines.pop() || ''
+          buffer += decoder.decode(value, { stream: true })
+          const lines = buffer.split('\n')
+          buffer = lines.pop() || ''
 
-        for (const line of lines) {
-          const trimmed = line.trim()
-          if (!trimmed || !trimmed.startsWith('data: ')) continue
-          const data = trimmed.slice(6)
-          if (data === '[DONE]') {
-            window.webContents.send('ai:stream:end', streamId)
-            return
-          }
-          try {
-            const parsed = JSON.parse(data)
-            const delta = parsed.choices?.[0]?.delta?.content
-            if (delta) {
-              window.webContents.send('ai:stream:delta', streamId, delta)
+          for (const line of lines) {
+            const trimmed = line.trim()
+            if (!trimmed || !trimmed.startsWith('data: ')) continue
+            const data = trimmed.slice(6)
+            if (data === '[DONE]') {
+              window.webContents.send('ai:stream:end', streamId)
+              return
             }
-          } catch {
-            // ignore json parse errors
+            try {
+              const parsed = JSON.parse(data)
+              const delta = parsed.choices?.[0]?.delta?.content
+              if (delta) {
+                window.webContents.send('ai:stream:delta', streamId, delta)
+              }
+            } catch {
+              // ignore json parse errors
+            }
           }
         }
+        window.webContents.send('ai:stream:end', streamId)
+      } catch (err: any) {
+        window.webContents.send('ai:stream:error', streamId, err.message)
       }
-      window.webContents.send('ai:stream:end', streamId)
-    } catch (err: any) {
-      window.webContents.send('ai:stream:error', streamId, err.message)
-    }
+    })()
   }
 
   // --- Anthropic (non-streaming) ---
@@ -385,7 +471,9 @@ export class AiService {
       },
       body: JSON.stringify({
         model: settings.model || 'claude-sonnet-4-20250514',
-        max_tokens: 4096,
+        max_tokens: settings.maxTokens ?? 4096,
+        temperature: settings.temperature ?? 0.7,
+        top_p: settings.topP ?? 1,
         system: systemMsg?.content || '',
         messages: chatMsgs
       })
@@ -430,7 +518,9 @@ export class AiService {
       },
       body: JSON.stringify({
         model: settings.model || 'claude-sonnet-4-20250514',
-        max_tokens: 4096,
+        max_tokens: settings.maxTokens ?? 4096,
+        temperature: settings.temperature ?? 0.7,
+        top_p: settings.topP ?? 1,
         system: systemMsg?.content || '',
         messages: chatMsgs,
         stream: true

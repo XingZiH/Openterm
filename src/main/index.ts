@@ -1,14 +1,24 @@
 import { app, BrowserWindow, ipcMain, shell, safeStorage, dialog } from 'electron'
 import { join } from 'path'
-import { readFileSync } from 'fs'
+import { readFileSync, promises as fsPromises } from 'fs'
+import { exec } from 'child_process'
+import { promisify } from 'util'
+
+const execAsync = promisify(exec)
 import { SSHManager } from './ssh-manager'
 import { Store } from './store'
 import { AiService } from './ai-service'
+import { LocalPtyManager } from './local-pty'
+import { getConfigPath } from './config-file'
+import { localFileManager } from './local-file-manager'
+
+const isDev = process.env.NODE_ENV === 'development'
 
 let mainWindow: BrowserWindow | null = null
 const sshManager = new SSHManager()
 const store = new Store()
 const aiService = new AiService()
+const localPtyManager = new LocalPtyManager()
 
 function createWindow(): void {
   const isMac = process.platform === 'darwin'
@@ -78,7 +88,15 @@ ipcMain.handle('store:saveSkill', (_e, skill) => store.saveSkill(skill))
 ipcMain.handle('store:deleteSkill', (_e, id) => store.deleteSkill(id))
 ipcMain.handle('store:importSkills', (_e, skills) => store.importSkills(skills))
 
-// --- IPC: Chat History ---
+// --- IPC: Config File ---
+ipcMain.handle('config:getPath', () => {
+  return getConfigPath()
+})
+ipcMain.handle('config:openFile', async () => {
+  const configPath = getConfigPath()
+  await shell.openPath(configPath)
+  return { success: true, path: configPath }
+})
 ipcMain.handle('chatHistory:getAll', () => store.getChatHistory())
 ipcMain.handle('chatHistory:save', (_e, entry) => store.saveChatSession(entry))
 ipcMain.handle('chatHistory:delete', (_e, sessionKey) => store.deleteChatSession(sessionKey))
@@ -121,6 +139,14 @@ sshManager.on('error', (sessionId: string, error: string) => {
 })
 
 // --- IPC: AI ---
+ipcMain.handle('ai:testConnection', async (_e, settings: any) => {
+  try {
+    const success = await aiService.testConnection(settings)
+    return { success }
+  } catch (err: any) {
+    return { success: false, error: err.message }
+  }
+})
 ipcMain.handle('ai:chat', async (_e, messages: any[], settings: any, options?: any) => {
   try {
     const reply = await aiService.chat(messages, settings, options)
@@ -165,11 +191,45 @@ ipcMain.handle('ai:compact', async (_e, messages: any[], settings: any) => {
   }
 })
 
-// --- IPC: SSH Exec ---
+// --- IPC: SSH Exec / Local Exec ---
 ipcMain.handle('ssh:exec', async (_e, sessionId: string, command: string) => {
   try {
+    if (sessionId.startsWith('local-')) {
+      const options: any = { encoding: 'utf-8', windowsHide: true }
+      if (process.platform === 'win32') {
+        options.shell = 'powershell.exe'
+      }
+      const { stdout, stderr } = await execAsync(command, options)
+      return { success: true, output: stdout || stderr }
+    }
     const output = await sshManager.exec(sessionId, command)
     return { success: true, output }
+  } catch (err: any) {
+    return { success: false, error: err.message }
+  }
+})
+
+// --- IPC: AI File Attachment Reader ---
+ipcMain.handle('file:readForAi', async (_e, sessionId: string, path: string, type: 'file' | 'dir') => {
+  try {
+    if (sessionId.startsWith('local-')) {
+      if (type === 'dir') {
+        const files = await fsPromises.readdir(path)
+        return { success: true, output: files.slice(0, 300).join('\n') }
+      } else {
+        const fd = await fsPromises.open(path, 'r')
+        const buffer = Buffer.alloc(50000)
+        const { bytesRead } = await fd.read(buffer, 0, 50000, 0)
+        await fd.close()
+        return { success: true, output: buffer.slice(0, bytesRead).toString('utf-8') }
+      }
+    } else {
+      const script = type === 'dir' 
+        ? `ls -lah "${path}" | head -n 300`
+        : `head -c 50000 "${path}"`
+      const output = await sshManager.exec(sessionId, script)
+      return { success: true, output }
+    }
   } catch (err: any) {
     return { success: false, error: err.message }
   }
@@ -208,6 +268,10 @@ ipcMain.handle('dialog:selectDirectory', async () => {
 // --- IPC: SFTP ---
 ipcMain.handle('sftp:ls', async (_e, sessionId: string, path: string) => {
   try {
+    if (sessionId.startsWith('local-')) {
+      const data = await localFileManager.ls(path)
+      return { success: true, data }
+    }
     const data = await sshManager.sftpLs(sessionId, path)
     return { success: true, data }
   } catch (err: any) {
@@ -217,6 +281,10 @@ ipcMain.handle('sftp:ls', async (_e, sessionId: string, path: string) => {
 
 ipcMain.handle('sftp:download', async (_e, sessionId: string, remotePath: string, localPath: string) => {
   try {
+    if (sessionId.startsWith('local-')) {
+      await localFileManager.download(remotePath, localPath)
+      return { success: true }
+    }
     await sshManager.sftpDownload(sessionId, remotePath, localPath)
     return { success: true }
   } catch (err: any) {
@@ -226,6 +294,10 @@ ipcMain.handle('sftp:download', async (_e, sessionId: string, remotePath: string
 
 ipcMain.handle('sftp:upload', async (_e, sessionId: string, localPath: string, remotePath: string) => {
   try {
+    if (sessionId.startsWith('local-')) {
+      await localFileManager.upload(localPath, remotePath)
+      return { success: true }
+    }
     await sshManager.sftpUpload(sessionId, localPath, remotePath)
     return { success: true }
   } catch (err: any) {
@@ -249,8 +321,50 @@ ipcMain.handle('file:readAsDataUrl', async (_e, filePath: string) => {
   }
 })
 
+// --- IPC: Local PTY ---
+ipcMain.handle('pty:spawn', (_e, id: string, cwd?: string) => {
+  try {
+    localPtyManager.spawn(id, cwd)
+    return { success: true }
+  } catch (err: any) {
+    return { success: false, error: err.message }
+  }
+})
+
+ipcMain.on('pty:write', (_e, id: string, data: string) => {
+  localPtyManager.write(id, data)
+})
+
+ipcMain.on('pty:resize', (_e, id: string, cols: number, rows: number) => {
+  localPtyManager.resize(id, cols, rows)
+})
+
+ipcMain.handle('pty:kill', (_e, id: string) => {
+  localPtyManager.kill(id)
+  return { success: true }
+})
+
+// Forward local PTY data/exit to renderer
+localPtyManager.on('data', (id: string, data: string) => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('pty:data', id, data)
+  }
+})
+
+localPtyManager.on('exit', (id: string, exitCode: number) => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('pty:exit', id, exitCode)
+  }
+})
+
 app.whenReady().then(() => {
   createWindow()
+
+  // Kill PTYs before window closes to prevent 'Object has been destroyed' errors
+  mainWindow?.on('close', () => {
+    localPtyManager.killAll()
+    sshManager.disconnectAll()
+  })
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -261,6 +375,7 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   sshManager.disconnectAll()
+  localPtyManager.killAll()
   if (process.platform !== 'darwin') {
     app.quit()
   }

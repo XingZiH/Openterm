@@ -1,3 +1,5 @@
+import { loadConfig, saveConfig } from './config-file'
+
 export interface ConnectionConfig {
   id: string
   name: string
@@ -13,7 +15,7 @@ export interface ConnectionConfig {
   updatedAt: number
 }
 
-export type AiProvider = 'openai' | 'anthropic' | 'ollama' | 'custom'
+export type AiProvider = 'openai' | 'anthropic' | 'ollama' | 'custom' | 'deepseek' | 'kimi' | 'qwen' | 'gemini' | 'groq' | 'xai' | 'custom-anthropic'
 
 export interface AppSettings {
   ai: {
@@ -23,6 +25,22 @@ export interface AppSettings {
     model: string
     ollamaUrl: string
     customPrompt?: string
+    temperature?: number
+    maxTokens?: number
+    topP?: number
+    profiles?: Record<string, {
+      provider: AiProvider
+      apiKey?: string
+      apiUrl?: string
+      model?: string
+      models?: string[]
+      ollamaUrl?: string
+      customPrompt?: string
+      temperature?: number
+      maxTokens?: number
+      topP?: number
+    }>
+    activeProfile?: string
   }
   relaxedMode: boolean
   termBgImage?: string | null
@@ -35,6 +53,7 @@ export interface AppSettings {
   termScrollback?: number
   termFontFamily?: string
   sidebarCollapsed?: boolean
+  defaultDownloadPath?: string
 }
 
 export interface ChatHistoryEntry {
@@ -56,11 +75,14 @@ export interface AgentSkill {
 
 const DEFAULT_SETTINGS: AppSettings = {
   ai: {
-    provider: 'custom',
-    apiKey: 'sk-hJvJldZ0dkSG88mXHuiljDTNNcIc2nUv3L7tGEpw57BLFhdL',
-    apiUrl: 'https://api.lhfcb.com/v1/chat/completions',
-    model: 'claude-opus-4-6',
-    ollamaUrl: 'http://localhost:11434'
+    provider: 'openai',
+    apiKey: '',
+    apiUrl: '',
+    model: '',
+    ollamaUrl: 'http://localhost:11434',
+    temperature: 0.7,
+    maxTokens: 4096,
+    topP: 1
   },
   relaxedMode: false
 }
@@ -110,12 +132,30 @@ export class Store {
 
   async getSettings(): Promise<AppSettings> {
     const store = await this.getStore()
-    return store.get('settings') as AppSettings
+    const base = store.get('settings') as AppSettings
+    // 合并 jsonc 配置覆盖
+    try {
+      const fileConfig = loadConfig()
+      if (fileConfig.ai) {
+        base.ai = { ...base.ai, ...fileConfig.ai }
+      }
+      const { ai, ...rest } = fileConfig
+      Object.assign(base, rest)
+    } catch (err) {
+      console.error('[store] Failed to merge config file:', err)
+    }
+    return base
   }
 
   async saveSettings(settings: AppSettings): Promise<void> {
     const store = await this.getStore()
     store.set('settings', settings)
+    // 同步写入 jsonc 配置文件
+    try {
+      saveConfig(settings)
+    } catch (err) {
+      console.error('[store] Failed to save config file:', err)
+    }
   }
 
   // --- Agent Skills ---

@@ -139,6 +139,14 @@ body {
   justify-content: center;
 }
 
+/* macOS: push toggle button below traffic lights when collapsed */
+.sidebar.collapsed.mac .sidebar-header {
+  padding-top: 28px;
+  flex-direction: column;
+  height: auto;
+  min-height: var(--titlebar-height);
+}
+
 .sidebar-toggle-btn {
   display: flex;
   align-items: center;
@@ -214,7 +222,10 @@ body {
 .nav-item .nav-icon {
   font-size: 16px;
   width: 20px;
-  text-align: center;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   flex-shrink: 0;
 }
 
@@ -1747,6 +1758,9 @@ body {
   border-bottom: 1px solid var(--border-subtle);
   gap: 6px 10px;
   flex-shrink: 0;
+  overflow: visible;
+  position: relative;
+  z-index: 10;
 }
 
 .ai-chat-title {
@@ -2693,6 +2707,10 @@ textarea.form-input {
   animation: toastEnter 0.5s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
   box-shadow: var(--shadow-lg);
   backdrop-filter: blur(10px);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: 480px;
 }
 
 .toast.success {
@@ -2703,6 +2721,24 @@ textarea.form-input {
 .toast.error {
   background: linear-gradient(135deg, var(--accent-red), #da3633);
   color: #fff;
+}
+
+.toast-close {
+  background: none;
+  border: none;
+  color: rgba(255, 255, 255, 0.7);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 2px 4px;
+  border-radius: 4px;
+  line-height: 1;
+  flex-shrink: 0;
+  transition: all 0.15s ease;
+}
+
+.toast-close:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.2);
 }
 
 @keyframes toastEnter {
@@ -3976,6 +4012,28 @@ textarea.form-input {
 .fm-breadcrumb-sep {
   color: rgba(255,255,255,0.2);
   user-select: none;
+}
+
+.fm-path-input {
+  flex: 1;
+  background: rgba(255,255,255,0.06);
+  border: 1px solid var(--border-active);
+  border-radius: 4px;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-family: var(--font-mono);
+  padding: 4px 8px;
+  outline: none;
+}
+
+.fm-path-tip {
+  color: rgba(255,255,255,0.25);
+  font-size: 11px;
+  font-style: italic;
+  margin-left: 10px;
+  white-space: nowrap;
+  user-select: none;
+  pointer-events: none;
 }
 
 .fm-actions {

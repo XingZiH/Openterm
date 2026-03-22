@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "electron-store": "^10.0.1",
+    "node-pty": "^1.1.0",
     "ssh2": "^1.16.0",
     "uuid": "^11.1.0"
   },
@@ -22,15 +23,16 @@
     "@types/ssh2": "^1.15.0",
     "@types/uuid": "^10.0.0",
     "@vitejs/plugin-react": "^4.5.0",
+    "@xterm/addon-fit": "^0.10.0",
+    "@xterm/xterm": "^5.5.0",
     "electron": "^35.0.0",
     "electron-builder": "^26.0.0",
     "electron-vite": "^3.1.0",
+    "png-to-ico": "^3.0.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "typescript": "^5.8.0",
-    "vite": "^6.0.0",
-    "@xterm/xterm": "^5.5.0",
-    "@xterm/addon-fit": "^0.10.0"
+    "vite": "^6.0.0"
   },
   "build": {
     "appId": "com.openterm.app",
@@ -38,6 +40,9 @@
     "mac": {
       "target": "dmg",
       "icon": "resources/icon.icns"
+    },
+    "win": {
+      "icon": "resources/icon.png"
     }
   }
 }

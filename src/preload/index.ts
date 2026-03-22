@@ -23,6 +23,7 @@ export interface ElectronAPI {
     importSkills: (skills: any[]) => Promise<void>
   }
   ai: {
+    testConnection: (settings: any) => Promise<{ success: boolean; error?: string }>
     chat: (messages: any[], settings: any, options?: any) => Promise<{ success: boolean; reply?: string; error?: string }>
     chatStream: (messages: any[], settings: any, streamId: string, options?: any) => Promise<{ success: boolean; error?: string }>
     onStreamDelta: (callback: (streamId: string, delta: string) => void) => () => void
@@ -45,6 +46,7 @@ export interface ElectronAPI {
   }
   file: {
     readAsDataUrl: (filePath: string) => Promise<string | null>
+    readForAi: (sessionId: string, path: string, type: 'file' | 'dir') => Promise<{ success: boolean; output?: string; error?: string }>
   }
   chatHistory: {
     getAll: () => Promise<any[]>
@@ -60,6 +62,18 @@ export interface ElectronAPI {
     getPlatform: () => Promise<string>
     getSize: () => Promise<number[]>
     setSize: (width: number, height: number) => void
+  }
+  pty: {
+    spawn: (id: string, cwd?: string) => Promise<{ success: boolean; error?: string }>
+    write: (id: string, data: string) => void
+    resize: (id: string, cols: number, rows: number) => void
+    kill: (id: string) => Promise<{ success: boolean }>
+    onData: (callback: (id: string, data: string) => void) => () => void
+    onExit: (callback: (id: string, exitCode: number) => void) => () => void
+  }
+  config: {
+    getPath: () => Promise<string>
+    openFile: () => Promise<{ success: boolean; path: string }>
   }
 }
 
@@ -98,6 +112,7 @@ const api: ElectronAPI = {
     importSkills: (skills) => ipcRenderer.invoke('store:importSkills', skills)
   },
   ai: {
+    testConnection: (settings) => ipcRenderer.invoke('ai:testConnection', settings),
     chat: (messages, settings, options) => ipcRenderer.invoke('ai:chat', messages, settings, options),
     chatStream: (messages, settings, streamId, options) => ipcRenderer.invoke('ai:chatStream', messages, settings, streamId, options),
     onStreamDelta: (callback) => {
@@ -135,7 +150,8 @@ const api: ElectronAPI = {
     selectDirectory: () => ipcRenderer.invoke('dialog:selectDirectory')
   },
   file: {
-    readAsDataUrl: (filePath) => ipcRenderer.invoke('file:readAsDataUrl', filePath)
+    readAsDataUrl: (filePath) => ipcRenderer.invoke('file:readAsDataUrl', filePath),
+    readForAi: (sessionId, path, type) => ipcRenderer.invoke('file:readForAi', sessionId, path, type)
   },
   chatHistory: {
     getAll: () => ipcRenderer.invoke('chatHistory:getAll'),
@@ -151,6 +167,26 @@ const api: ElectronAPI = {
     getPlatform: () => ipcRenderer.invoke('window:getPlatform'),
     getSize: () => ipcRenderer.invoke('window:getSize'),
     setSize: (width: number, height: number) => ipcRenderer.send('window:setSize', width, height)
+  },
+  pty: {
+    spawn: (id, cwd) => ipcRenderer.invoke('pty:spawn', id, cwd),
+    write: (id, data) => ipcRenderer.send('pty:write', id, data),
+    resize: (id, cols, rows) => ipcRenderer.send('pty:resize', id, cols, rows),
+    kill: (id) => ipcRenderer.invoke('pty:kill', id),
+    onData: (callback) => {
+      const handler = (_: any, id: string, data: string) => callback(id, data)
+      ipcRenderer.on('pty:data', handler)
+      return () => ipcRenderer.removeListener('pty:data', handler)
+    },
+    onExit: (callback) => {
+      const handler = (_: any, id: string, exitCode: number) => callback(id, exitCode)
+      ipcRenderer.on('pty:exit', handler)
+      return () => ipcRenderer.removeListener('pty:exit', handler)
+    }
+  },
+  config: {
+    getPath: () => ipcRenderer.invoke('config:getPath'),
+    openFile: () => ipcRenderer.invoke('config:openFile')
   }
 }
 

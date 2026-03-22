@@ -125,15 +125,34 @@ export function useServerMetrics(sessionId: string | null) {
       if (!window.electronAPI || !sessionId || !mounted) return
 
       try {
-        // Single batch of 6 commands
-        const results = await Promise.all([
-          window.electronAPI.ssh.exec(sessionId, `cat /etc/os-release 2>/dev/null | grep -E '^(PRETTY_NAME|ID)=' | head -2; echo '---SEP---'; hostname; echo '---SEP---'; cat /proc/uptime; echo '---SEP---'; cat /proc/loadavg`),
-          window.electronAPI.ssh.exec(sessionId, `nproc; echo '---SEP---'; top -bn1 | grep '%Cpu'`),
-          window.electronAPI.ssh.exec(sessionId, `free -b | grep -E 'Mem:'`),
-          window.electronAPI.ssh.exec(sessionId, `df -B1 2>/dev/null | tail -n +2 | grep -vE 'tmpfs|devtmpfs|udev|overlay|shm' | head -8`),
-          window.electronAPI.ssh.exec(sessionId, `cat /proc/net/dev 2>/dev/null | tail -n +3`),
-          window.electronAPI.ssh.exec(sessionId, `ps aux --sort=-%cpu 2>/dev/null | head -8 | tail -7`)
-        ])
+        // Detect remote OS
+        const unameRes = await window.electronAPI.ssh.exec(sessionId, 'uname -s')
+        const osType = (unameRes?.output || '').trim() // 'Linux' or 'Darwin'
+        const isDarwin = osType === 'Darwin'
+
+        let results: any[]
+
+        if (isDarwin) {
+          // macOS commands
+          results = await Promise.all([
+            window.electronAPI.ssh.exec(sessionId, `sw_vers -productName 2>/dev/null; echo '---SEP---'; sw_vers -productVersion 2>/dev/null; echo '---SEP---'; hostname; echo '---SEP---'; sysctl -n kern.boottime 2>/dev/null; echo '---SEP---'; sysctl -n vm.loadavg 2>/dev/null`),
+            window.electronAPI.ssh.exec(sessionId, `sysctl -n hw.ncpu 2>/dev/null; echo '---SEP---'; top -l 1 -n 0 2>/dev/null | grep 'CPU usage'`),
+            window.electronAPI.ssh.exec(sessionId, `sysctl -n hw.memsize 2>/dev/null; echo '---SEP---'; vm_stat 2>/dev/null`),
+            window.electronAPI.ssh.exec(sessionId, `df -k 2>/dev/null | tail -n +2 | grep -vE 'devfs|map|tmpfs' | head -8`),
+            window.electronAPI.ssh.exec(sessionId, `netstat -ib 2>/dev/null | grep -vE '^Name|^lo' | head -10`),
+            window.electronAPI.ssh.exec(sessionId, `ps aux -r 2>/dev/null | head -8 | tail -7`)
+          ])
+        } else {
+          // Linux commands (original)
+          results = await Promise.all([
+            window.electronAPI.ssh.exec(sessionId, `cat /etc/os-release 2>/dev/null | grep -E '^(PRETTY_NAME|ID)=' | head -2; echo '---SEP---'; hostname; echo '---SEP---'; cat /proc/uptime; echo '---SEP---'; cat /proc/loadavg`),
+            window.electronAPI.ssh.exec(sessionId, `nproc; echo '---SEP---'; top -bn1 | grep '%Cpu'`),
+            window.electronAPI.ssh.exec(sessionId, `free -b | grep -E 'Mem:'`),
+            window.electronAPI.ssh.exec(sessionId, `df -B1 2>/dev/null | tail -n +2 | grep -vE 'tmpfs|devtmpfs|udev|overlay|shm' | head -8`),
+            window.electronAPI.ssh.exec(sessionId, `cat /proc/net/dev 2>/dev/null | tail -n +3`),
+            window.electronAPI.ssh.exec(sessionId, `ps aux --sort=-%cpu 2>/dev/null | head -8 | tail -7`)
+          ])
+        }
 
         if (!mounted) return
 
@@ -144,62 +163,154 @@ export function useServerMetrics(sessionId: string | null) {
         const netOut = results[4]?.output || ''
         const procOut = results[5]?.output || ''
 
-        // Parse OS
-        const prettyName = osOut.match(/PRETTY_NAME="?([^"\n]+)"?/)?.[1] || 'Linux'
-        const sepParts = osOut.split('---SEP---')
-        const hostname = (sepParts[1] || '').trim()
-        const uptimeStr = (sepParts[2] || '').trim()
-        const uptimeMatch = uptimeStr.match(/^(\d+\.?\d*)/)
-        const uptimeSeconds = uptimeMatch ? parseFloat(uptimeMatch[1]) : 0
-        const loadStr = (sepParts[3] || '').trim()
-        const loadParts = loadStr.split(/\s+/)
-        const procInfo = loadStr.match(/(\d+)\/(\d+)/)
+        let osName = 'Linux', hostname = '', uptimeSeconds = 0
+        let loadAvg: string[] = ['0', '0', '0']
+        let runningProcs = '0', totalProcs = '0'
+
+        if (isDarwin) {
+          // Parse macOS OS info
+          const sepParts = osOut.split('---SEP---')
+          const productName = (sepParts[0] || '').trim() || 'macOS'
+          const productVer = (sepParts[1] || '').trim()
+          osName = productVer ? `${productName} ${productVer}` : productName
+          hostname = (sepParts[2] || '').trim()
+          // kern.boottime: { sec = 1234567890, usec = 0 } ...
+          const bootMatch = (sepParts[3] || '').match(/sec\s*=\s*(\d+)/)
+          if (bootMatch) {
+            uptimeSeconds = Math.floor(Date.now() / 1000) - parseInt(bootMatch[1])
+          }
+          // vm.loadavg: { 1.23 4.56 7.89 }
+          const loadMatch = (sepParts[4] || '').match(/([\d.]+)\s+([\d.]+)\s+([\d.]+)/)
+          if (loadMatch) loadAvg = [loadMatch[1], loadMatch[2], loadMatch[3]]
+        } else {
+          // Parse Linux OS info (original)
+          osName = osOut.match(/PRETTY_NAME="?([^"\n]+)"?/)?.[1] || 'Linux'
+          const sepParts = osOut.split('---SEP---')
+          hostname = (sepParts[1] || '').trim()
+          const uptimeStr = (sepParts[2] || '').trim()
+          const uptimeMatch = uptimeStr.match(/^(\d+\.?\d*)/)
+          uptimeSeconds = uptimeMatch ? parseFloat(uptimeMatch[1]) : 0
+          const loadStr = (sepParts[3] || '').trim()
+          const loadParts = loadStr.split(/\s+/)
+          loadAvg = [loadParts[0] || '0', loadParts[1] || '0', loadParts[2] || '0']
+          const procInfo = loadStr.match(/(\d+)\/(\d+)/)
+          runningProcs = procInfo ? procInfo[1] : '0'
+          totalProcs = procInfo ? procInfo[2] : '0'
+        }
 
         // Parse CPU
-        const cpuParts = cpuOut.split('---SEP---')
-        const cores = parseInt((cpuParts[0] || cpuOut.split('\n')[0] || '').trim()) || 1
-        const cpuLine = cpuOut
-        const cpuMatch = cpuLine.match(/(\d+\.?\d*)\s*us.*?(\d+\.?\d*)\s*sy.*?(\d+\.?\d*)\s*ni.*?(\d+\.?\d*)\s*id.*?(\d+\.?\d*)\s*wa/)
-        const cpuUser = cpuMatch ? parseFloat(cpuMatch[1]) : 0
-        const cpuSys = cpuMatch ? parseFloat(cpuMatch[2]) : 0
-        const cpuIo = cpuMatch ? parseFloat(cpuMatch[5]) : 0
-        const cpuIdle = cpuMatch ? parseFloat(cpuMatch[4]) : 0
+        let cores = 1, cpuUser = 0, cpuSys = 0, cpuIo = 0, cpuIdle = 100
+        if (isDarwin) {
+          const cpuParts = cpuOut.split('---SEP---')
+          cores = parseInt((cpuParts[0] || '').trim()) || 1
+          // CPU usage: 5.26% user, 10.52% sys, 84.21% idle
+          const usageMatch = cpuOut.match(/([\d.]+)%\s*user.*?([\d.]+)%\s*sys.*?([\d.]+)%\s*idle/)
+          if (usageMatch) {
+            cpuUser = parseFloat(usageMatch[1])
+            cpuSys = parseFloat(usageMatch[2])
+            cpuIdle = parseFloat(usageMatch[3])
+          }
+        } else {
+          const cpuParts = cpuOut.split('---SEP---')
+          cores = parseInt((cpuParts[0] || cpuOut.split('\n')[0] || '').trim()) || 1
+          const cpuMatch = cpuOut.match(/(\d+\.?\d*)\s*us.*?(\d+\.?\d*)\s*sy.*?(\d+\.?\d*)\s*ni.*?(\d+\.?\d*)\s*id.*?(\d+\.?\d*)\s*wa/)
+          cpuUser = cpuMatch ? parseFloat(cpuMatch[1]) : 0
+          cpuSys = cpuMatch ? parseFloat(cpuMatch[2]) : 0
+          cpuIo = cpuMatch ? parseFloat(cpuMatch[5]) : 0
+          cpuIdle = cpuMatch ? parseFloat(cpuMatch[4]) : 0
+        }
 
         // Parse RAM
-        const ramParts = ramOut.trim().split(/\s+/)
-        const ramTotal = parseInt(ramParts[1]) || 1
-        const ramUsed = parseInt(ramParts[2]) || 0
-        const ramCached = parseInt(ramParts[5]) || 0
-        const ramAvailable = parseInt(ramParts[6]) || ramTotal - ramUsed
+        let ramTotal = 1, ramUsed = 0, ramCached = 0, ramAvailable = 0
+        if (isDarwin) {
+          const ramParts = ramOut.split('---SEP---')
+          ramTotal = parseInt((ramParts[0] || '').trim()) || 1
+          // vm_stat output: Pages active: 12345.
+          const vmstat = ramParts[1] || ''
+          const pageSize = 16384 // Apple Silicon default; Intel is 4096
+          const pageSizeMatch = vmstat.match(/page size of (\d+) bytes/)
+          const ps = pageSizeMatch ? parseInt(pageSizeMatch[1]) : pageSize
+          const active = parseInt(vmstat.match(/Pages active:\s*(\d+)/)?.[1] || '0') * ps
+          const wired = parseInt(vmstat.match(/Pages wired down:\s*(\d+)/)?.[1] || '0') * ps
+          const compressed = parseInt(vmstat.match(/Pages occupied by compressor:\s*(\d+)/)?.[1] || '0') * ps
+          const inactive = parseInt(vmstat.match(/Pages inactive:\s*(\d+)/)?.[1] || '0') * ps
+          const purgeable = parseInt(vmstat.match(/Pages purgeable:\s*(\d+)/)?.[1] || '0') * ps
+          const free = parseInt(vmstat.match(/Pages free:\s*(\d+)/)?.[1] || '0') * ps
+          ramUsed = active + wired + compressed
+          ramCached = inactive + purgeable
+          ramAvailable = free + inactive + purgeable
+        } else {
+          const ramParts = ramOut.trim().split(/\s+/)
+          ramTotal = parseInt(ramParts[1]) || 1
+          ramUsed = parseInt(ramParts[2]) || 0
+          ramCached = parseInt(ramParts[5]) || 0
+          ramAvailable = parseInt(ramParts[6]) || ramTotal - ramUsed
+        }
 
-        // Parse Disks — use standard df output: fs size used avail use% mount
+        // Parse Disks
         const disks = diskOut.trim().split('\n').filter(Boolean).map((line: string) => {
           const parts = line.trim().split(/\s+/)
-          // standard df -B1: filesystem 1B-blocks used available use% mountpoint
-          const total = parseInt(parts[1]) || 0
-          const used = parseInt(parts[2]) || 0
-          const available = parseInt(parts[3]) || 0
-          const usagePercent = parseInt(parts[4]) || 0
-          const mount = parts[5] || parts[0] || '/'
-          return { mount, total, used, available, usagePercent }
-        }).filter((d) => d.total > 0)
+          if (isDarwin) {
+            // df -k: filesystem 1024-blocks used available capacity mount
+            const total = (parseInt(parts[1]) || 0) * 1024
+            const used = (parseInt(parts[2]) || 0) * 1024
+            const available = (parseInt(parts[3]) || 0) * 1024
+            const usagePercent = parseInt(parts[4]) || 0
+            const mount = parts.slice(5).join(' ') || parts[0] || '/'
+            return { mount, total, used, available, usagePercent }
+          } else {
+            const total = parseInt(parts[1]) || 0
+            const used = parseInt(parts[2]) || 0
+            const available = parseInt(parts[3]) || 0
+            const usagePercent = parseInt(parts[4]) || 0
+            const mount = parts[5] || parts[0] || '/'
+            return { mount, total, used, available, usagePercent }
+          }
+        }).filter((d: { total: number }) => d.total > 0)
 
         // Parse Network
         const now = Date.now()
         const prevNet = prevNetRef.current
-        const network = netOut.trim().split('\n').filter(Boolean).map((line: string) => {
-          const m = line.trim().match(/^(\S+?):\s*(\d+)\s+\d+\s+\d+\s+\d+\s+\d+\s+\d+\s+\d+\s+\d+\s+(\d+)/)
-          if (!m) return null
-          const iface = m[1]
-          const rxBytes = parseInt(m[2]) || 0
-          const txBytes = parseInt(m[3]) || 0
-          const prev = prevNet.get(iface)
-          const dt = prev ? Math.max((now - prev.time) / 1000, 0.5) : 3
-          const rxRate = prev ? Math.max(0, (rxBytes - prev.rx) / dt) : 0
-          const txRate = prev ? Math.max(0, (txBytes - prev.tx) / dt) : 0
-          prevNet.set(iface, { rx: rxBytes, tx: txBytes, time: now })
-          return { iface, rxBytes, txBytes, rxRate, txRate }
-        }).filter((n): n is NonNullable<typeof n> => n !== null && n.iface !== 'lo' && (n.rxBytes > 0 || n.txBytes > 0))
+        let network: { iface: string; rxBytes: number; txBytes: number; rxRate: number; txRate: number }[]
+
+        if (isDarwin) {
+          // netstat -ib: Name Mtu Network Address Ipkts Ierrs Ibytes Opkts Oerrs Obytes
+          network = netOut.trim().split('\n').filter(Boolean).map((line: string) => {
+            const parts = line.trim().split(/\s+/)
+            if (parts.length < 10) return null
+            const iface = parts[0]
+            const rxBytes = parseInt(parts[6]) || 0
+            const txBytes = parseInt(parts[9]) || 0
+            if (rxBytes === 0 && txBytes === 0) return null
+            const prev = prevNet.get(iface)
+            const dt = prev ? Math.max((now - prev.time) / 1000, 0.5) : 3
+            const rxRate = prev ? Math.max(0, (rxBytes - prev.rx) / dt) : 0
+            const txRate = prev ? Math.max(0, (txBytes - prev.tx) / dt) : 0
+            prevNet.set(iface, { rx: rxBytes, tx: txBytes, time: now })
+            return { iface, rxBytes, txBytes, rxRate, txRate }
+          }).filter((n: any): n is NonNullable<typeof n> => n !== null && !n.iface.startsWith('lo'))
+          // Deduplicate interfaces (netstat -ib can list same iface multiple times)
+          const seen = new Set<string>()
+          network = network.filter(n => {
+            if (seen.has(n.iface)) return false
+            seen.add(n.iface)
+            return true
+          })
+        } else {
+          network = netOut.trim().split('\n').filter(Boolean).map((line: string) => {
+            const m = line.trim().match(/^(\S+?):\s*(\d+)\s+\d+\s+\d+\s+\d+\s+\d+\s+\d+\s+\d+\s+\d+\s+(\d+)/)
+            if (!m) return null
+            const iface = m[1]
+            const rxBytes = parseInt(m[2]) || 0
+            const txBytes = parseInt(m[3]) || 0
+            const prev = prevNet.get(iface)
+            const dt = prev ? Math.max((now - prev.time) / 1000, 0.5) : 3
+            const rxRate = prev ? Math.max(0, (rxBytes - prev.rx) / dt) : 0
+            const txRate = prev ? Math.max(0, (txBytes - prev.tx) / dt) : 0
+            prevNet.set(iface, { rx: rxBytes, tx: txBytes, time: now })
+            return { iface, rxBytes, txBytes, rxRate, txRate }
+          }).filter((n: any): n is NonNullable<typeof n> => n !== null && n.iface !== 'lo' && (n.rxBytes > 0 || n.txBytes > 0))
+        }
 
         // Parse Processes
         const processes = procOut.trim().split('\n').filter(Boolean).map((line: string) => {
@@ -216,12 +327,12 @@ export function useServerMetrics(sessionId: string | null) {
         if (mounted) {
           setMetrics({
             os: {
-              name: prettyName,
+              name: osName,
               hostname,
               uptime: formatUptime(uptimeSeconds),
-              loadAvg: [loadParts[0] || '0', loadParts[1] || '0', loadParts[2] || '0'],
-              runningProcs: procInfo ? procInfo[1] : '0',
-              totalProcs: procInfo ? procInfo[2] : '0'
+              loadAvg,
+              runningProcs,
+              totalProcs
             },
             cpu: { cores, usagePercent: Math.round(100 - cpuIdle), user: cpuUser, system: cpuSys, io: cpuIo, idle: cpuIdle },
             ram: { total: ramTotal, used: ramUsed, cached: ramCached, available: ramAvailable, usagePercent: Math.round((ramUsed / ramTotal) * 100) },

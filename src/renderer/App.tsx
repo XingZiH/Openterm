@@ -1,4 +1,5 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
+import { createPortal } from 'react-dom'
 import {
   ConnectionConfig,
   Session,
@@ -59,7 +60,7 @@ function CommandBlock({
   return (
     <div className={`command-block ${dangerous ? 'dangerous' : ''}`}>
       <div className="command-block-header">
-        <span className="command-block-lang">bash</span>
+        <span className="command-block-lang">Shell</span>
         {dangerous && (
           <span className="command-warning">⚠️ 危险命令</span>
         )}
@@ -126,7 +127,7 @@ function ChatMessageView({
   const commands = isUser ? [] : extractCommands(displayContent)
   const textParts = isUser
     ? [displayContent]
-    : displayContent.split(/```(?:bash|sh|shell|zsh)?\s*\n[\s\S]*?```/)
+    : displayContent.split(/```(?:bash|sh|shell|zsh|powershell|ps1|bat|cmd)?\w*\s*\n[\s\S]*?```/)
 
   return (
     <div className="chat-message">
@@ -308,17 +309,55 @@ function ConnectionForm({
 // ===========================
 function SettingsPage({
   settings,
-  onSave
+  onSave,
+  showToast
 }: {
   settings: AppSettings
   onSave: (s: AppSettings) => void
+  showToast: (msg: string, type: 'success' | 'error') => void
 }) {
   const [form, setForm] = useState(settings)
+  const [isTesting, setIsTesting] = useState(false)
 
   useEffect(() => { setForm(settings) }, [settings])
 
+  const handleTestConnection = async () => {
+    setIsTesting(true)
+    try {
+      const result = await window.electronAPI.ai.testConnection(form.ai)
+      if (result.success) {
+        showToast('API 连接测试成功！', 'success')
+      } else {
+        showToast(`API 连接失败: ${result.error}`, 'error')
+      }
+    } catch (err: any) {
+      showToast(`测试出错: ${err.message}`, 'error')
+    } finally {
+      setIsTesting(false)
+    }
+  }
+
   const handleSave = () => {
-    onSave(form)
+    const finalForm = { ...form, ai: { ...form.ai, profiles: { ...(form.ai.profiles || {}) } } }
+    if (finalForm.ai.activeProfile && finalForm.ai.profiles[finalForm.ai.activeProfile]) {
+      const active = finalForm.ai.profiles[finalForm.ai.activeProfile]
+      const currentModels = active.models || []
+      const allModels = [...new Set([...currentModels, finalForm.ai.model].filter(Boolean))]
+      finalForm.ai.profiles[finalForm.ai.activeProfile] = {
+        ...active,
+        provider: finalForm.ai.provider,
+        apiKey: finalForm.ai.apiKey,
+        apiUrl: finalForm.ai.apiUrl,
+        model: finalForm.ai.model,
+        models: allModels,
+        ollamaUrl: finalForm.ai.ollamaUrl,
+        customPrompt: finalForm.ai.customPrompt,
+        temperature: finalForm.ai.temperature,
+        maxTokens: finalForm.ai.maxTokens,
+        topP: finalForm.ai.topP
+      }
+    }
+    onSave(finalForm)
   }
 
   return (
@@ -416,6 +455,210 @@ function SettingsPage({
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><circle cx="8" cy="8" r="6"/><path d="M5 6.5C5.5 5.5 6.5 5 8 5s2.5.5 3 1.5M5.5 9.5h5"/></svg>
           Agent 配置
         </div>
+
+        {/* Profile 管理 */}
+        <div className="form-group" style={{ borderBottom: '1px solid rgba(255,255,255,0.06)', paddingBottom: 12, marginBottom: 12 }}>
+          <label className="form-label" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            Profile 配置
+            <span style={{ fontSize: 10, padding: '1px 6px', borderRadius: 4, background: 'rgba(99,102,241,0.15)', color: 'var(--accent)' }}>
+              {Object.keys(form.ai.profiles || {}).length} 个
+            </span>
+          </label>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <select
+              className="form-select"
+              style={{ flex: 1 }}
+              value={form.ai.activeProfile || ''}
+              onChange={(e) => {
+                const profileName = e.target.value
+                if (!profileName) {
+                  setForm({ ...form, ai: { ...form.ai, activeProfile: '' } })
+                  return
+                }
+                const profile = (form.ai.profiles || {})[profileName]
+                if (profile) {
+                  setForm({
+                    ...form,
+                    ai: {
+                      ...form.ai,
+                      activeProfile: profileName,
+                      provider: profile.provider || form.ai.provider,
+                      apiKey: profile.apiKey ?? form.ai.apiKey,
+                      apiUrl: profile.apiUrl ?? form.ai.apiUrl,
+                      model: profile.model ?? form.ai.model,
+                      ollamaUrl: profile.ollamaUrl ?? form.ai.ollamaUrl,
+                      customPrompt: profile.customPrompt ?? form.ai.customPrompt,
+                      temperature: profile.temperature ?? form.ai.temperature,
+                      maxTokens: profile.maxTokens ?? form.ai.maxTokens,
+                      topP: profile.topP ?? form.ai.topP
+                    }
+                  })
+                }
+              }}
+            >
+              <option value="">-- 选择 Profile --</option>
+              {Object.keys(form.ai.profiles || {}).map((name) => (
+                <option key={name} value={name}>{name}</option>
+              ))}
+            </select>
+            {!(form as any)._showProfileInput ? (
+              <button
+                className="btn btn-secondary"
+                style={{ whiteSpace: 'nowrap', fontSize: 12, padding: '4px 10px' }}
+                onClick={() => setForm({ ...form, _showProfileInput: true, _profileInputName: '' } as any)}
+              >
+                + 存为 Profile
+              </button>
+            ) : (
+              <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+                <input
+                  className="form-input"
+                  style={{ width: 120, padding: '3px 8px', fontSize: 12 }}
+                  placeholder="Profile 名称"
+                  autoFocus
+                  value={(form as any)._profileInputName || ''}
+                  onChange={(e) => setForm({ ...form, _profileInputName: e.target.value } as any)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      const name = ((form as any)._profileInputName || '').trim()
+                      if (!name) return
+                      const profiles = { ...(form.ai.profiles || {}) }
+                      profiles[name] = {
+                        provider: form.ai.provider,
+                        apiKey: form.ai.apiKey,
+                        apiUrl: form.ai.apiUrl,
+                        model: form.ai.model,
+                        ollamaUrl: form.ai.ollamaUrl,
+                        customPrompt: form.ai.customPrompt,
+                        temperature: form.ai.temperature,
+                        maxTokens: form.ai.maxTokens,
+                        topP: form.ai.topP
+                      }
+                      setForm({ ...form, ai: { ...form.ai, profiles, activeProfile: name }, _showProfileInput: false, _profileInputName: '' } as any)
+                    }
+                    if (e.key === 'Escape') {
+                      setForm({ ...form, _showProfileInput: false, _profileInputName: '' } as any)
+                    }
+                  }}
+                />
+                <button
+                  className="btn btn-secondary"
+                  style={{ padding: '3px 8px', fontSize: 12 }}
+                  onClick={() => {
+                    const name = ((form as any)._profileInputName || '').trim()
+                    if (!name) return
+                    const profiles = { ...(form.ai.profiles || {}) }
+                    profiles[name] = {
+                      provider: form.ai.provider,
+                      apiKey: form.ai.apiKey,
+                      apiUrl: form.ai.apiUrl,
+                      model: form.ai.model,
+                      ollamaUrl: form.ai.ollamaUrl,
+                      customPrompt: form.ai.customPrompt,
+                      temperature: form.ai.temperature,
+                      maxTokens: form.ai.maxTokens,
+                      topP: form.ai.topP
+                    }
+                    setForm({ ...form, ai: { ...form.ai, profiles, activeProfile: name }, _showProfileInput: false, _profileInputName: '' } as any)
+                  }}
+                >✓</button>
+                <button
+                  className="btn btn-secondary"
+                  style={{ padding: '3px 8px', fontSize: 12 }}
+                  onClick={() => setForm({ ...form, _showProfileInput: false, _profileInputName: '' } as any)}
+                >✕</button>
+              </div>
+            )}
+            {form.ai.activeProfile && (form.ai.profiles || {})[form.ai.activeProfile] && (
+              <>
+                <button className="btn btn-secondary" style={{ whiteSpace: 'nowrap', fontSize: 12, padding: '4px 10px', color: '#ef4444' }}
+                  onClick={() => {
+                    const profiles = { ...(form.ai.profiles || {}) }
+                    delete profiles[form.ai.activeProfile!]
+                    setForm({ ...form, ai: { ...form.ai, profiles, activeProfile: '' } })
+                  }}
+                >删除 Profile</button>
+              </>
+            )}
+          </div>
+
+          {/* Profile 模型列表管理 */}
+          {form.ai.activeProfile && (form.ai.profiles || {})[form.ai.activeProfile] && (() => {
+            const activeProfile = (form.ai.profiles || {})[form.ai.activeProfile!]
+            const models = activeProfile?.models || []
+            return (
+              <div style={{ marginTop: 10, padding: '10px 12px', background: 'rgba(255,255,255,0.02)', borderRadius: 8, border: '1px solid rgba(255,255,255,0.05)' }}>
+                <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
+                  📋 Profile「{form.ai.activeProfile}」模型列表
+                  <span style={{ fontSize: 10, padding: '1px 5px', borderRadius: 4, background: 'rgba(99,102,241,0.1)', color: 'var(--accent)' }}>{models.length}</span>
+                </div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 8 }}>
+                  {models.map((m: string) => (
+                    <span key={m} style={{
+                      display: 'inline-flex', alignItems: 'center', gap: 4,
+                      padding: '3px 8px', borderRadius: 6, fontSize: 11, fontFamily: 'var(--font-mono)',
+                      background: m === form.ai.model ? 'rgba(99,102,241,0.2)' : 'rgba(255,255,255,0.06)',
+                      color: m === form.ai.model ? 'var(--accent)' : 'var(--text-secondary)',
+                      border: m === form.ai.model ? '1px solid rgba(99,102,241,0.3)' : '1px solid transparent',
+                      cursor: 'pointer'
+                    }}
+                      onClick={() => setForm({ ...form, ai: { ...form.ai, model: m } })}
+                    >
+                      {m === form.ai.model && <span style={{ fontSize: 8 }}>●</span>}
+                      {m}
+                      <span style={{ cursor: 'pointer', opacity: 0.5, fontSize: 10, marginLeft: 2 }} onClick={(e) => {
+                        e.stopPropagation()
+                        const profiles = { ...(form.ai.profiles || {}) }
+                        const name = form.ai.activeProfile!
+                        const updatedModels = models.filter((x: string) => x !== m)
+                        profiles[name] = { ...profiles[name], models: updatedModels }
+                        if (form.ai.model === m && updatedModels.length > 0) {
+                          setForm({ ...form, ai: { ...form.ai, profiles, model: updatedModels[0] } })
+                        } else {
+                          setForm({ ...form, ai: { ...form.ai, profiles } })
+                        }
+                      }}>✕</span>
+                    </span>
+                  ))}
+                </div>
+                <div style={{ display: 'flex', gap: 6 }}>
+                  <input
+                    className="form-input"
+                    style={{ flex: 1, padding: '4px 8px', fontSize: 11 }}
+                    placeholder="输入模型名后回车添加，如 gpt-4o, moonshot-v1-8k"
+                    value={(form as any)._newModelInput || ''}
+                    onChange={(e) => setForm({ ...form, _newModelInput: e.target.value } as any)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        const newModel = ((form as any)._newModelInput || '').trim()
+                        if (!newModel || models.includes(newModel)) return
+                        const profiles = { ...(form.ai.profiles || {}) }
+                        const name = form.ai.activeProfile!
+                        profiles[name] = { ...profiles[name], models: [...models, newModel] }
+                        setForm({ ...form, ai: { ...form.ai, profiles }, _newModelInput: '' } as any)
+                      }
+                    }}
+                  />
+                  <button className="btn btn-secondary" style={{ padding: '4px 10px', fontSize: 11 }}
+                    onClick={() => {
+                      const newModel = ((form as any)._newModelInput || '').trim()
+                      if (!newModel || models.includes(newModel)) return
+                      const profiles = { ...(form.ai.profiles || {}) }
+                      const name = form.ai.activeProfile!
+                      profiles[name] = { ...profiles[name], models: [...models, newModel] }
+                      setForm({ ...form, ai: { ...form.ai, profiles }, _newModelInput: '' } as any)
+                    }}
+                  >+ 添加</button>
+                </div>
+              </div>
+            )
+          })()}
+
+          <span style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 6, display: 'block' }}>
+            每个 Profile 可配置多个模型，在聊天面板快速切换
+          </span>
+        </div>
+
         <div className="form-group">
           <label className="form-label">AI 提供商</label>
           <select
@@ -426,41 +669,79 @@ function SettingsPage({
               const defaults: Record<string, { apiUrl: string; model: string }> = {
                 openai: { apiUrl: 'https://api.openai.com/v1/chat/completions', model: 'gpt-4o-mini' },
                 anthropic: { apiUrl: 'https://api.anthropic.com/v1/messages', model: 'claude-sonnet-4-20250514' },
+                gemini: { apiUrl: 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions', model: 'gemini-2.0-flash' },
                 ollama: { apiUrl: '', model: 'llama3' },
-                custom: { apiUrl: form.ai.apiUrl, model: form.ai.model }
+                deepseek: { apiUrl: 'https://api.deepseek.com/chat/completions', model: 'deepseek-chat' },
+                kimi: { apiUrl: 'https://api.moonshot.cn/v1/chat/completions', model: 'moonshot-v1-8k' },
+                qwen: { apiUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions', model: 'qwen-plus' },
+                groq: { apiUrl: 'https://api.groq.com/openai/v1/chat/completions', model: 'llama-3.3-70b-versatile' },
+                xai: { apiUrl: 'https://api.x.ai/v1/chat/completions', model: 'grok-3-mini-fast' },
+                custom: { apiUrl: form.ai.apiUrl, model: form.ai.model },
+                'custom-anthropic': { apiUrl: form.ai.apiUrl, model: form.ai.model }
               }
               const d = defaults[provider] || defaults.openai
               setForm({ ...form, ai: { ...form.ai, provider, apiUrl: d.apiUrl, model: d.model } })
             }}
           >
-            <option value="openai">OpenAI</option>
-            <option value="anthropic">Anthropic Claude</option>
-            <option value="ollama">Ollama (本地)</option>
-            <option value="custom">自定义 (OpenAI 兼容)</option>
+            <optgroup label="通用提供商">
+              <option value="openai">OpenAI</option>
+              <option value="anthropic">Anthropic Claude</option>
+              <option value="gemini">Google Gemini</option>
+              <option value="ollama">Ollama (本地推理)</option>
+            </optgroup>
+            <optgroup label="中国大模型">
+              <option value="deepseek">DeepSeek (深度求索)</option>
+              <option value="kimi">Kimi (月之暗面)</option>
+              <option value="qwen">通义千问 (阿里云)</option>
+            </optgroup>
+            <optgroup label="高性能推理">
+              <option value="groq">Groq</option>
+              <option value="xai">xAI Grok</option>
+            </optgroup>
+            <optgroup label="自定义">
+              <option value="custom">自定义 (OpenAI 兼容协议)</option>
+              <option value="custom-anthropic">自定义 (Anthropic 协议)</option>
+            </optgroup>
           </select>
+          <span style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4, display: 'block' }}>
+            {(form.ai.provider === 'openai' || form.ai.provider === 'deepseek' || form.ai.provider === 'kimi' || form.ai.provider === 'qwen' || form.ai.provider === 'gemini' || form.ai.provider === 'groq' || form.ai.provider === 'xai') && 'OpenAI 兼容协议 · Authorization: Bearer · /chat/completions'}
+            {form.ai.provider === 'anthropic' && 'Anthropic 协议 · x-api-key · /v1/messages'}
+            {form.ai.provider === 'ollama' && '本地 Ollama 服务 · 无需认证 · 默认 http://localhost:11434'}
+            {form.ai.provider === 'custom' && 'OpenAI 兼容协议 · 适用于中转站或私有部署'}
+            {form.ai.provider === 'custom-anthropic' && 'Anthropic 协议 · 适用于 Anthropic 中转站或代理'}
+          </span>
         </div>
 
-        {/* OpenAI / Anthropic / Custom — need API Key */}
-        {(form.ai.provider === 'openai' || form.ai.provider === 'anthropic' || form.ai.provider === 'custom') && (
+        {/* API Key — all except ollama */}
+        {form.ai.provider !== 'ollama' && (
           <div className="form-group">
             <label className="form-label">API Key</label>
             <input
               className="form-input"
               type="password"
-              placeholder={form.ai.provider === 'anthropic' ? 'sk-ant-...' : 'sk-...'}
+              placeholder={
+                (form.ai.provider === 'anthropic' || form.ai.provider === 'custom-anthropic') ? 'sk-ant-...' :
+                form.ai.provider === 'deepseek' ? 'sk-...' :
+                form.ai.provider === 'kimi' ? 'sk-...' :
+                form.ai.provider === 'qwen' ? 'sk-...' :
+                'sk-...'
+              }
               value={form.ai.apiKey}
               onChange={(e) => setForm({ ...form, ai: { ...form.ai, apiKey: e.target.value } })}
             />
           </div>
         )}
 
-        {/* API URL — all except ollama auto-filled */}
+        {/* API URL — all except ollama */}
         {form.ai.provider !== 'ollama' && (
           <div className="form-group">
             <label className="form-label">API URL</label>
             <input
               className="form-input"
-              placeholder={form.ai.provider === 'anthropic' ? 'https://api.anthropic.com/v1/messages' : 'https://api.openai.com/v1/chat/completions'}
+              placeholder={
+                (form.ai.provider === 'anthropic' || form.ai.provider === 'custom-anthropic') ? 'https://api.anthropic.com/v1/messages' :
+                'https://api.openai.com/v1/chat/completions'
+              }
               value={form.ai.apiUrl}
               onChange={(e) => setForm({ ...form, ai: { ...form.ai, apiUrl: e.target.value } })}
             />
@@ -481,17 +762,89 @@ function SettingsPage({
         )}
 
         {/* Model */}
-        <div className="form-group">
+        <div className="form-group" style={{ marginBottom: 8 }}>
           <label className="form-label">模型</label>
           <input
             className="form-input"
             placeholder={
-              form.ai.provider === 'anthropic' ? 'claude-sonnet-4-20250514' :
+              form.ai.provider === 'anthropic' || form.ai.provider === 'custom-anthropic' ? 'claude-sonnet-4-20250514' :
+              form.ai.provider === 'deepseek' ? 'deepseek-chat' :
+              form.ai.provider === 'kimi' ? 'moonshot-v1-8k' :
+              form.ai.provider === 'qwen' ? 'qwen-plus' :
+              form.ai.provider === 'gemini' ? 'gemini-2.0-flash' :
+              form.ai.provider === 'groq' ? 'llama-3.3-70b-versatile' :
+              form.ai.provider === 'xai' ? 'grok-3-mini-fast' :
               form.ai.provider === 'ollama' ? 'llama3' : 'gpt-4o-mini'
             }
             value={form.ai.model}
             onChange={(e) => setForm({ ...form, ai: { ...form.ai, model: e.target.value } })}
           />
+        </div>
+
+        <div style={{ display: 'flex', justifyContent: 'flex-start', marginBottom: 16 }}>
+          <button 
+            className="btn btn-secondary" 
+            style={{ fontSize: 13, gap: 6, minWidth: 100, justifyContent: 'center' }}
+            onClick={handleTestConnection}
+            disabled={isTesting}
+          >
+            {isTesting ? (
+              <span className="icon" style={{ animation: 'spin 1s linear infinite' }}>⏳</span>
+            ) : (
+              <span className="icon">🔌</span>
+            )}
+            {isTesting ? '正在测试...' : '测试连接'}
+          </button>
+        </div>
+
+        {/* Model Parameters */}
+        <div style={{ borderTop: '1px solid rgba(255,255,255,0.06)', marginTop: 12, paddingTop: 12 }}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 10, letterSpacing: '0.5px', textTransform: 'uppercase' }}>模型参数</div>
+          
+          <div className="form-group">
+            <label className="form-label">Temperature (创造性)</label>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <input type="range" className="form-input" style={{ flex: 1, padding: 0 }}
+                min="0" max="200" step="1" value={Math.round((form.ai.temperature ?? 0.7) * 100)}
+                onChange={(e) => setForm({ ...form, ai: { ...form.ai, temperature: parseInt(e.target.value) / 100 } })}
+              />
+              <span style={{ fontSize: 12, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', minWidth: 36 }}>
+                {(form.ai.temperature ?? 0.7).toFixed(2)}
+              </span>
+            </div>
+            <span style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2, display: 'block' }}>
+              0 = 精确确定，1 = 默认平衡，2 = 最大创造
+            </span>
+          </div>
+
+          <div className="form-group">
+            <label className="form-label">Max Tokens (最大输出长度)</label>
+            <input
+              className="form-input"
+              type="number"
+              min="256"
+              max="128000"
+              step="256"
+              value={form.ai.maxTokens ?? 4096}
+              onChange={(e) => setForm({ ...form, ai: { ...form.ai, maxTokens: parseInt(e.target.value) || 4096 } })}
+            />
+          </div>
+
+          <div className="form-group">
+            <label className="form-label">Top P (核采样)</label>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <input type="range" className="form-input" style={{ flex: 1, padding: 0 }}
+                min="0" max="100" step="1" value={Math.round((form.ai.topP ?? 1) * 100)}
+                onChange={(e) => setForm({ ...form, ai: { ...form.ai, topP: parseInt(e.target.value) / 100 } })}
+              />
+              <span style={{ fontSize: 12, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', minWidth: 36 }}>
+                {(form.ai.topP ?? 1).toFixed(2)}
+              </span>
+            </div>
+            <span style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2, display: 'block' }}>
+              1 = 不限制，&lt;1 = 仅在概率前 N% 内采样
+            </span>
+          </div>
         </div>
 
         {/* Custom System Prompt */}
@@ -548,9 +901,21 @@ function SettingsPage({
       </div>
       
       </div>
-      <button className="btn btn-primary" onClick={handleSave} style={{ marginTop: 24 }}>
-        保存设置
-      </button>
+      <div style={{ display: 'flex', gap: 12, marginTop: 24, alignItems: 'center' }}>
+        <button className="btn btn-primary" onClick={handleSave}>
+          保存设置
+        </button>
+        <button className="btn btn-secondary" onClick={async () => {
+          // 先保存一次确保文件存在
+          handleSave()
+          await (window as any).electronAPI.config.openFile()
+        }}>
+          📄 打开配置文件
+        </button>
+        <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+          设置同步到 openterm.jsonc，支持手动编辑
+        </span>
+      </div>
     </div>
   )
 }
@@ -631,10 +996,10 @@ export default function App() {
   const [editingConnection, setEditingConnection] = useState<ConnectionConfig | null>(null)
   const [settings, setSettings] = useState<AppSettings>({
     ai: {
-      provider: 'custom',
-      apiKey: 'sk-hJvJldZ0dkSG88mXHuiljDTNNcIc2nUv3L7tGEpw57BLFhdL',
-      apiUrl: 'https://api.lhfcb.com/v1/chat/completions',
-      model: 'claude-opus-4-6',
+      provider: 'openai',
+      apiKey: '',
+      apiUrl: '',
+      model: '',
       ollamaUrl: 'http://localhost:11434',
       customPrompt: ''
     },
@@ -646,6 +1011,7 @@ export default function App() {
   const [chatInput, setChatInput] = useState('')
   const [aiLoading, setAiLoading] = useState(false)
   const [showModelSwitch, setShowModelSwitch] = useState(false)
+  const [modelDropdownPos, setModelDropdownPos] = useState<{top?: number; bottom?: number; left?: number}>({})
   const [showChatHistory, setShowChatHistory] = useState(false)
   const [chatHistoryList, setChatHistoryList] = useState<ChatHistoryEntry[]>([])
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null)
@@ -823,12 +1189,24 @@ export default function App() {
               // Persist
               const activeSession = sessions.find(s => s.id === activeSessionId)
               const conn = activeSession ? connections.find(c => c.id === activeSession.connectionId) : null
-              window.electronAPI.chatHistory.save({
+              const now = Date.now()
+              const entryToSave = {
                 sessionKey: chatKey,
                 name: conn?.name || activeSession?.name || 'Unknown',
                 messages: msgs,
-                createdAt: Date.now(),
-                updatedAt: Date.now()
+                createdAt: now,
+                updatedAt: now
+              }
+              window.electronAPI.chatHistory.save(entryToSave)
+              setChatHistoryList(prev => {
+                const newList = [...prev]
+                const idx = newList.findIndex(h => h.sessionKey === chatKey)
+                if (idx >= 0) {
+                  newList[idx] = { ...entryToSave, createdAt: newList[idx].createdAt }
+                } else {
+                  newList.push(entryToSave)
+                }
+                return newList
               })
               // If not a workflow, fallback: extract commands and auto-execute
               if (!isWorkflow && settingsRef.current.relaxedMode) {
@@ -926,6 +1304,38 @@ export default function App() {
     }
   }, [])
 
+  // Local PTY event listeners
+  useEffect(() => {
+    if (!window.electronAPI) return
+
+    const removePtyData = window.electronAPI.pty.onData((id, data) => {
+      const ref = terminalRefs.current.get(id)
+      if (ref) {
+        ref.terminal.write(data)
+      }
+    })
+
+    const removePtyExit = window.electronAPI.pty.onExit((id) => {
+      setSessions((prev) => prev.filter((s) => s.id !== id))
+      const termRef = terminalRefs.current.get(id)
+      if (termRef) {
+        termRef.terminal.dispose()
+        termRef.container.remove()
+        terminalRefs.current.delete(id)
+      }
+      setActiveSessionId((prev) => {
+        if (prev === id) return null
+        return prev
+      })
+      showToast('本地终端已关闭', 'success')
+    })
+
+    return () => {
+      removePtyData()
+      removePtyExit()
+    }
+  }, [])
+
   // Auto scroll chat to bottom
   useEffect(() => {
     if (chatMessagesRef.current) {
@@ -972,12 +1382,22 @@ export default function App() {
         fitAddon.fit()
         const dims = fitAddon.proposeDimensions()
         if (dims) {
-          window.electronAPI.ssh.resize(sessionId, dims.cols, dims.rows)
+          // Route resize to PTY or SSH based on session ID prefix
+          if (sessionId.startsWith('local-')) {
+            window.electronAPI.pty.resize(sessionId, dims.cols, dims.rows)
+          } else {
+            window.electronAPI.ssh.resize(sessionId, dims.cols, dims.rows)
+          }
         }
       }, 150)
 
       terminal.onData((data) => {
-        window.electronAPI.ssh.sendData(sessionId, data)
+        // Route input to PTY or SSH based on session ID prefix
+        if (sessionId.startsWith('local-')) {
+          window.electronAPI.pty.write(sessionId, data)
+        } else {
+          window.electronAPI.ssh.sendData(sessionId, data)
+        }
       })
 
       terminalRefs.current.set(sessionId, { terminal, fitAddon, container })
@@ -1102,7 +1522,12 @@ export default function App() {
 
   // Disconnect
   const handleDisconnect = async (sessionId: string) => {
-    await window.electronAPI.ssh.disconnect(sessionId)
+    const session = sessions.find(s => s.id === sessionId)
+    if (session?.isLocal) {
+      await window.electronAPI.pty.kill(sessionId)
+    } else {
+      await window.electronAPI.ssh.disconnect(sessionId)
+    }
     // Remove terminal DOM
     const termRef = terminalRefs.current.get(sessionId)
     if (termRef) {
@@ -1114,7 +1539,28 @@ export default function App() {
     if (activeSessionId === sessionId) {
       setActiveSessionId(null)
     }
-    showToast('已断开连接', 'success')
+    showToast(session?.isLocal ? '本地终端已关闭' : '已断开连接', 'success')
+  }
+
+  // Open local terminal
+  const handleOpenLocalTerminal = async () => {
+    const id = `local-${Date.now()}`
+    const result = await window.electronAPI.pty.spawn(id)
+    if (result.success) {
+      const newSession: Session = {
+        id,
+        connectionId: id,
+        name: '本地终端',
+        host: 'localhost',
+        status: 'connected',
+        isLocal: true
+      }
+      setSessions((prev) => [...prev, newSession])
+      setActiveSessionId(id)
+      showToast('本地终端已打开', 'success')
+    } else {
+      showToast(`本地终端启动失败: ${result.error}`, 'error')
+    }
   }
 
   const handleDisconnectAll = () => {
@@ -1249,8 +1695,8 @@ ${output.slice(0, 3000)}
     // generic: { items: [{label, value, color?}] }  注：如果是generic类型且内容复杂（如docker信息），只需给出总结即可，不要把大段英文日志塞进 items，保持界面整洁干爽！
   }
 }` }],
-        settingsRef.current.ai,
-        { agentId: activeAgentId }
+        settings.ai,
+        { agentId: 'diagnose', sessionId: activeSessionId }
       ).then(aiResult => {
         if (!aiResult.success || !aiResult.reply) {
           showFallback()
@@ -1395,7 +1841,7 @@ ${stepOutput.slice(0, 1500)}
 \`\`\`
 请用一句大白话（不超过50字）总结这个结果，给Linux小白看的，像跟朋友聊天。只回复总结文字，不要其他内容。` }],
             settingsRef.current.ai,
-            { agentId: activeAgentId }
+            { agentId: activeAgentId, sessionId: sessionId }
           )
           if (aiRes.success && aiRes.reply) {
             setActiveWorkflow(prev => {
@@ -1428,7 +1874,7 @@ ${stepOutput.slice(0, 1500)}
 请给出2-3个备选方案，用 JSON 格式回复：
 { "branches": [{ "label": "方案名称", "description": "简单解释", "command": "替代命令" }] }` }],
           settingsRef.current.ai,
-          { agentId: activeAgentId }
+          { agentId: activeAgentId, sessionId: sessionId }
         )
 
         if (branchResult.success && branchResult.reply) {
@@ -1527,12 +1973,24 @@ ${stepOutput.slice(0, 1500)}
           const newMap = new Map(prevMap)
           newMap.set(chatKey, msgs)
           const conn = connections.find(c => c.id === activeSession?.connectionId)
-          window.electronAPI.chatHistory.save({
+          const now = Date.now()
+          const entryToSave = {
             sessionKey: chatKey,
             name: conn?.name || activeSession?.name || 'Unknown',
             messages: msgs,
-            createdAt: Date.now(),
-            updatedAt: Date.now()
+            createdAt: now,
+            updatedAt: now
+          }
+          window.electronAPI.chatHistory.save(entryToSave)
+          setChatHistoryList(prev => {
+            const newList = [...prev]
+            const idx = newList.findIndex(h => h.sessionKey === chatKey)
+            if (idx >= 0) {
+              newList[idx] = { ...entryToSave, createdAt: newList[idx].createdAt }
+            } else {
+              newList.push(entryToSave)
+            }
+            return newList
           })
           return newMap
         })
@@ -1578,7 +2036,7 @@ ${historyStr.slice(-15000)}
       const result = await window.electronAPI.ai.chat(
         [{ role: 'user', content: prompt }], 
         settingsRef.current.ai, 
-        { agentId: activeAgentId }
+        { agentId: activeAgentId, sessionId: activeSessionId }
       )
 
       if (result.success && result.reply) {
@@ -1627,8 +2085,7 @@ ${historyStr.slice(-15000)}
         try {
           if (file.type === 'd') {
             setStreamingContent(`正在读取目录: ${file.name}...`)
-            // Read folder contents up to 300 lines
-            const execRes = await window.electronAPI.ssh.exec(activeSessionId, `ls -lah "${file.path}" | head -n 300`)
+            const execRes = await window.electronAPI.file.readForAi(activeSessionId, file.path, 'dir')
             if (execRes.success && execRes.output) {
               let content = execRes.output
               if (content.split('\n').length >= 295) {
@@ -1640,8 +2097,7 @@ ${historyStr.slice(-15000)}
             }
           } else {
             setStreamingContent(`正在读取文件: ${file.name}...`)
-            // Read up to 50KB securely
-            const execRes = await window.electronAPI.ssh.exec(activeSessionId, `head -c 50000 "${file.path}"`)
+            const execRes = await window.electronAPI.file.readForAi(activeSessionId, file.path, 'file')
             if (execRes.success && execRes.output) {
               let content = execRes.output
               if (content.length >= 49500) {
@@ -1735,7 +2191,7 @@ ${historyStr.slice(-15000)}
       apiMessages,
       settings.ai,
       streamId,
-      { agentId: activeAgentId, terminalContext: terminalContext || undefined }
+      { agentId: activeAgentId, terminalContext: terminalContext || undefined, sessionId: activeSessionId }
     )
 
     if (!result.success) {
@@ -1820,12 +2276,17 @@ ${historyStr.slice(-15000)}
     setTokenInfo(null)
   }
 
+  const visibleChatHistory = useMemo(() => {
+    if (!activeConnectionId) return [] as ChatHistoryEntry[]
+    return chatHistoryList.filter(h => h.sessionKey.startsWith(activeConnectionId))
+  }, [chatHistoryList, activeConnectionId])
+
   const connectedSessions = sessions.filter((s) => s.status === 'connected')
 
   return (
     <div className="app-layout">
       {/* SIDEBAR */}
-      <div className={`sidebar ${sidebarCollapsed ? 'collapsed' : ''}`}>
+      <div className={`sidebar ${sidebarCollapsed ? 'collapsed' : ''} ${platform === 'darwin' ? 'mac' : ''}`}>
         <div className="sidebar-header">
           {!sidebarCollapsed && <span className="sidebar-logo">OpenTerm</span>}
           <button className="sidebar-toggle-btn" onClick={() => setSidebarCollapsed(v => !v)}
@@ -1867,8 +2328,14 @@ ${historyStr.slice(-15000)}
             <span className="nav-icon"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><circle cx="8" cy="8" r="3"/><path d="M12.4 5.2a6 6 0 0 1 0 5.6M3.6 5.2a6 6 0 0 0 0 5.6M8 2v1M8 13v1M2 8h1M13 8h1M3.8 3.8l.7.7M11.5 11.5l.7.7M12.2 3.8l-.7.7M4.5 11.5l-.7.7"/></svg></span>
             {!sidebarCollapsed && '设置'}
           </button>
-
-          {/* Sessions */}
+          <button
+            className="nav-item"
+            onClick={handleOpenLocalTerminal}
+            title="本地终端"
+          >
+            <span className="nav-icon"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><rect x="1" y="1" width="14" height="14" rx="2"/><path d="M4 6l3 2.5-3 2.5"/><path d="M9 11h4"/></svg></span>
+            {!sidebarCollapsed && '本地终端'}
+          </button>
           {connectedSessions.length > 0 && (
             <>
               {!sidebarCollapsed && <div className="sidebar-section-title">会话</div>}
@@ -1901,7 +2368,7 @@ ${historyStr.slice(-15000)}
           )}
 
           {/* Chat History in sidebar */}
-          {!sidebarCollapsed && chatHistoryList.length > 0 && (
+          {!sidebarCollapsed && visibleChatHistory.length > 0 && (
             <>
               <div className="sidebar-section-title">
                 聊天历史
@@ -1911,16 +2378,30 @@ ${historyStr.slice(-15000)}
                   setChatMessages(new Map())
                 }}>清除</button>
               </div>
-              {chatHistoryList
+              {visibleChatHistory
                 .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
                 .slice(0, 20)
                 .map(entry => (
                   <div key={entry.sessionKey}
                     className={`chat-history-sidebar-item ${activeConnectionId === entry.sessionKey ? 'active' : ''}`}
                     onClick={() => {
-                      // Find connected session for this connectionId
-                      const s = sessions.find(s => s.connectionId === entry.sessionKey && s.status === 'connected')
-                      if (s) setActiveSessionId(s.id)
+                      // Find connected session for this connectionId using base ID
+                      const baseConnectionId = entry.sessionKey.split(':')[0]
+                      const s = sessions.find(s => s.connectionId === baseConnectionId && s.status === 'connected')
+                      if (s) {
+                        setActiveSessionId(s.id)
+                        setActiveChatKey(entry.sessionKey)
+                      } else {
+                        // Restore an offline view so the chat history can be viewed
+                        const newId = entry.sessionKey
+                        if (!connections.find(c => c.id === newId)) {
+                          setConnections(prev => [...prev, { id: newId, name: entry.name || '离线历史', host: 'offline', isLocal: entry.sessionKey.startsWith('local-'), port: 22, username: 'offline', authType: 'password' }])
+                        }
+                        if (!sessions.find(s => s.id === newId)) {
+                          setSessions(prev => [...prev, { id: newId, name: entry.name || '离线历史', connectionId: newId, status: 'disconnected', history: ['\r\n\x1b[33m ⚠️ 这是一个离线历史会话\x1b[0m\r\n\r\n\x1b[90m 这个终端的底层进程在您上次关闭此时就已结束。\r\n 因此，当时的屏幕输出日志已经无法找回，这里也不会再响应任何新的命令输入。\r\n\r\n 👉 如果您只想回顾大模型，请直接收起终端区，您的 AI 对话记录已在右侧原样保留复现！\r\n 👉 如果您要继续执行命令，请在左侧边栏顶端重新点击【+ 本地终端】来新建一个活跃的连接口。\x1b[0m\r\n\r\n'], currentInput: '', host: 'offline' }])
+                        }
+                        setActiveSessionId(newId)
+                      }
                     }}
                     title={`${entry.name} — ${entry.messages?.length || 0} 条消息`}
                   >
@@ -1937,18 +2418,31 @@ ${historyStr.slice(-15000)}
                 ))}
             </>
           )}
-          {sidebarCollapsed && chatHistoryList.length > 0 && (
+          {sidebarCollapsed && visibleChatHistory.length > 0 && (
             <>
               <div className="sidebar-section-title" style={{ padding: '16px 0 6px', textAlign: 'center' }}>—</div>
-              {chatHistoryList
+              {visibleChatHistory
                 .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
                 .slice(0, 10)
                 .map(entry => (
                   <div key={entry.sessionKey}
                     className={`chat-history-sidebar-item ${activeConnectionId === entry.sessionKey ? 'active' : ''}`}
                     onClick={() => {
-                      const s = sessions.find(s => s.connectionId === entry.sessionKey && s.status === 'connected')
-                      if (s) setActiveSessionId(s.id)
+                        const baseConnectionId = entry.sessionKey.split(':')[0]
+                        const s = sessions.find(s => s.connectionId === baseConnectionId && s.status === 'connected')
+                        if (s) {
+                          setActiveSessionId(s.id)
+                          setActiveChatKey(entry.sessionKey)
+                        } else {
+                          const newId = entry.sessionKey
+                          if (!connections.find(c => c.id === newId)) {
+                            setConnections(prev => [...prev, { id: newId, name: entry.name || '离线历史', host: 'offline', isLocal: entry.sessionKey.startsWith('local-'), port: 22, username: 'offline', authType: 'password' }])
+                          }
+                          if (!sessions.find(s => s.id === newId)) {
+                            setSessions(prev => [...prev, { id: newId, name: entry.name || '离线历史', connectionId: newId, status: 'disconnected', history: ['\r\n\x1b[33m ⚠️ 这是一个离线历史会话\x1b[0m\r\n\r\n\x1b[90m 这个终端的底层进程在您上次关闭应用时就已结束。\r\n 因此，当时的屏幕输出日志已经无法找回，这里也不会再响应任何新的命令输入。\r\n\r\n 👉 如果您只想回顾大模型，请直接收起终端区，您的 AI 对话记录已在右侧原样保留复现！\r\n 👉 如果您要继续执行命令，请在左侧边栏顶端重新点击【+ 本地终端】来新建一个活跃的连接口。\x1b[0m\r\n\r\n'], currentInput: '', host: 'offline' }])
+                          }
+                          setActiveSessionId(newId)
+                        }
                     }}
                     title={`${entry.name} — ${entry.messages?.length || 0} 条消息`}
                   >
@@ -2047,6 +2541,9 @@ ${historyStr.slice(-15000)}
           )}
           {!activeSession && page === 'overview' && (
             <div className="titlebar-actions">
+              <button className="titlebar-btn" onClick={handleOpenLocalTerminal}>
+                &gt;_ 本地终端
+              </button>
               <button className="titlebar-btn" onClick={() => setShowForm(true)}>
                 + 新建连接
               </button>
@@ -2315,74 +2812,188 @@ ${historyStr.slice(-15000)}
                 Agent
               </span>
               {/* Model quick switch */}
-              <div className="ai-model-switch-wrapper">
-                <button className="ai-model-badge" onClick={() => setShowModelSwitch(v => !v)}>
-                  {settings.ai.provider === 'anthropic' ? 'Claude' : settings.ai.provider === 'ollama' ? 'Ollama' : settings.ai.provider === 'custom' ? 'Custom' : 'OpenAI'} / {settings.ai.model || 'default'}
+              <div className="ai-model-switch-wrapper" style={{ position: 'relative' }}>
+                <button className="ai-model-badge" onClick={(e) => {
+                  if (!showModelSwitch) {
+                    const rect = e.currentTarget.getBoundingClientRect()
+                    setModelDropdownPos({
+                      top: rect.bottom + 4,
+                      left: Math.max(8, Math.min(rect.left, window.innerWidth - 350))
+                    })
+                  }
+                  setShowModelSwitch(v => !v)
+                }}>
+                  {({ openai:'OpenAI', anthropic:'Claude', ollama:'Ollama', custom:'Custom', deepseek:'DeepSeek', kimi:'Kimi', qwen:'Qwen', gemini:'Gemini', groq:'Groq', xai:'Grok', 'custom-anthropic':'Custom' } as Record<string,string>)[settings.ai.provider] || settings.ai.provider} / {settings.ai.model || 'default'}
                   <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M2.5 4l2.5 2.5L7.5 4"/></svg>
                 </button>
-                {showModelSwitch && (
-                  <div className="ai-model-dropdown">
-                    <div className="ai-model-dropdown-title">快捷切换模型</div>
-                    {[
-                      { provider: 'custom' as const, models: ['gpt-5.3-codex', 'gpt-5.4-pro', 'gpt-5.2-codex'], label: 'Codex' },
-                      { provider: 'openai' as const, models: ['gpt-4o-mini', 'gpt-4o', 'gpt-4-turbo', 'o3-mini'], label: 'OpenAI' },
-                      { provider: 'anthropic' as const, models: ['claude-sonnet-4-20250514', 'claude-opus-4-20250514', 'claude-haiku-4-20250514'], label: 'Claude' },
-                      { provider: 'ollama' as const, models: ['llama3', 'codellama', 'mistral', 'deepseek-coder'], label: 'Ollama' },
-                    ].map(group => (
-                      <div key={group.provider}>
-                        <div className="ai-model-group-label">{group.label}</div>
-                        {group.models.map(model => (
-                          <button key={model}
-                            className={`ai-model-option ${settings.ai.provider === group.provider && settings.ai.model === model ? 'active' : ''}`}
-                            onClick={() => {
-                              const defaults: Record<string, string> = {
-                                openai: 'https://api.openai.com/v1/chat/completions',
-                                anthropic: 'https://api.anthropic.com/v1/messages',
-                                ollama: '',
-                              }
-                              // Codex models use their own endpoint + key
-                              const isCodex = group.label === 'Codex'
-                              const updated = {
-                                ...settingsRef.current,
-                                ai: {
-                                  ...settingsRef.current.ai,
-                                  provider: group.provider,
-                                  model,
-                                  apiUrl: isCodex ? 'https://www.codex.hair/v1/chat/completions' : (defaults[group.provider] || settingsRef.current.ai.apiUrl),
-                                  ...(isCodex ? { apiKey: 'sk-3dd443b53bd1309c80cb9e00d32d657dfba7fb7dd0ca649de5741980efd74ebf' } : {})
-                                }
-                              }
-                              setSettings(updated)
-                              window.electronAPI.store.saveSettings(updated)
-                              setShowModelSwitch(false)
-                            }}
-                          >{model}</button>
-                        ))}
-                      </div>
-                    ))}
-                    {/* Always show custom config if user has set a custom apiUrl */}
-                    {(settings.ai.provider === 'custom' || (settings.ai.apiUrl && !settings.ai.apiUrl.includes('openai.com') && !settings.ai.apiUrl.includes('anthropic.com') && settings.ai.provider !== 'ollama')) && (
-                      <div>
-                        <div className="ai-model-group-label">自定义 API</div>
-                        <button
-                          className={`ai-model-option ${settings.ai.provider === 'custom' ? 'active' : ''}`}
-                          onClick={() => {
-                            // Switch back to custom config — keep existing apiUrl/apiKey/model
-                            const updated = {
-                              ...settingsRef.current,
-                              ai: { ...settingsRef.current.ai, provider: 'custom' as const }
-                            }
-                            setSettings(updated)
-                            window.electronAPI.store.saveSettings(updated)
-                            setShowModelSwitch(false)
-                          }}
-                        >
-                          {settings.ai.model}
-                          <span className="ai-model-option-url">{settings.ai.apiUrl ? new URL(settings.ai.apiUrl).hostname : ''}</span>
-                        </button>
+                {showModelSwitch && createPortal(
+                  <>
+                  <div style={{ position: 'fixed', inset: 0, zIndex: 9998 }} onClick={() => setShowModelSwitch(false)} />
+                  <div className="ai-model-dropdown" style={{
+                    position: 'fixed',
+                    top: modelDropdownPos.top ?? 0,
+                    left: modelDropdownPos.left ?? 0,
+                    zIndex: 9999,
+                    width: 340, maxHeight: 'calc(100vh - ' + ((modelDropdownPos.top ?? 0) + 8) + 'px)', overflowY: 'auto',
+                    background: 'linear-gradient(135deg, rgba(15,15,35,0.98), rgba(20,20,45,0.98))',
+                    border: '1px solid rgba(99,102,241,0.2)',
+                    borderRadius: 12, padding: 0,
+                    backdropFilter: 'blur(20px)',
+                    boxShadow: '0 8px 40px rgba(0,0,0,0.5), 0 0 0 1px rgba(255,255,255,0.05) inset'
+                  }}>
+                    {/* Header */}
+                    <div style={{
+                      padding: '12px 16px 10px', borderBottom: '1px solid rgba(255,255,255,0.06)',
+                      display: 'flex', alignItems: 'center', justifyContent: 'space-between'
+                    }}>
+                      <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>模型切换</span>
+                      <span style={{ fontSize: 11, color: 'var(--text-muted)', background: 'rgba(99,102,241,0.12)', padding: '2px 8px', borderRadius: 6 }}>
+                        {({ openai:'OpenAI', anthropic:'Claude', ollama:'Ollama', custom:'Custom', deepseek:'DeepSeek', kimi:'Kimi', qwen:'Qwen', gemini:'Gemini', groq:'Groq', xai:'Grok', 'custom-anthropic':'Custom' } as Record<string,string>)[settings.ai.provider] || settings.ai.provider}
+                      </span>
+                    </div>
+
+                    {/* Profiles Section — each profile shows its models */}
+                    {settings.ai.profiles && Object.keys(settings.ai.profiles).length > 0 && (
+                      <div style={{ padding: '8px 12px' }}>
+                        <div style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 6, padding: '0 4px' }}>
+                          ⚡ Profiles
+                        </div>
+                        {Object.entries(settings.ai.profiles).map(([name, profile]: [string, any]) => {
+                          const providerEmoji: Record<string, string> = { openai: '🟢', anthropic: '🟠', deepseek: '🔵', kimi: '🌙', qwen: '☁️', gemini: '💎', groq: '⚡', xai: '🅧', ollama: '🦙', custom: '🔧', 'custom-anthropic': '🔧' }
+                          const isActiveProfile = settings.ai.activeProfile === name
+                          const profileModels = profile.models && profile.models.length > 0 ? profile.models : [profile.model || 'default']
+                          return (
+                            <div key={`p-${name}`} style={{ marginBottom: 8 }}>
+                              <div style={{ fontSize: 10, fontWeight: 600, color: isActiveProfile ? 'var(--accent)' : 'var(--text-muted)', marginBottom: 4, padding: '0 4px', display: 'flex', alignItems: 'center', gap: 4 }}>
+                                <span>{providerEmoji[profile.provider] || '🔧'}</span>
+                                <span>{name}</span>
+                                {isActiveProfile && <span style={{ fontSize: 8, color: 'var(--accent)' }}>●</span>}
+                              </div>
+                              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                                {profileModels.map((model: string) => {
+                                  const isActive = isActiveProfile && settings.ai.model === model
+                                  return (
+                                    <button key={`${name}-${model}`} onClick={() => {
+                                      const updated = {
+                                        ...settingsRef.current,
+                                        ai: {
+                                          ...settingsRef.current.ai,
+                                          activeProfile: name,
+                                          provider: profile.provider || settingsRef.current.ai.provider,
+                                          apiKey: profile.apiKey ?? settingsRef.current.ai.apiKey,
+                                          apiUrl: profile.apiUrl ?? settingsRef.current.ai.apiUrl,
+                                          model: model,
+                                          ollamaUrl: profile.ollamaUrl ?? settingsRef.current.ai.ollamaUrl,
+                                          customPrompt: profile.customPrompt ?? settingsRef.current.ai.customPrompt,
+                                          temperature: profile.temperature ?? settingsRef.current.ai.temperature,
+                                          maxTokens: profile.maxTokens ?? settingsRef.current.ai.maxTokens,
+                                          topP: profile.topP ?? settingsRef.current.ai.topP
+                                        }
+                                      }
+                                      setSettings(updated)
+                                      window.electronAPI.store.saveSettings(updated)
+                                      setShowModelSwitch(false)
+                                    }} style={{
+                                      padding: '5px 10px', borderRadius: 6, border: 'none', cursor: 'pointer',
+                                      fontSize: 11, fontFamily: 'var(--font-mono)',
+                                      background: isActive ? 'rgba(99,102,241,0.2)' : 'rgba(255,255,255,0.04)',
+                                      color: isActive ? 'var(--accent)' : 'var(--text-secondary)',
+                                      fontWeight: isActive ? 600 : 400,
+                                      transition: 'all 0.15s ease'
+                                    }}
+                                    onMouseEnter={(e) => { if (!isActive) e.currentTarget.style.background = 'rgba(255,255,255,0.08)' }}
+                                    onMouseLeave={(e) => { if (!isActive) e.currentTarget.style.background = isActive ? 'rgba(99,102,241,0.2)' : 'rgba(255,255,255,0.04)' }}
+                                    >{model}</button>
+                                  )
+                                })}
+                              </div>
+                            </div>
+                          )
+                        })}
                       </div>
                     )}
+
+                    {/* Divider */}
+                    {settings.ai.profiles && Object.keys(settings.ai.profiles).length > 0 && (
+                      <div style={{ borderTop: '1px solid rgba(255,255,255,0.06)', margin: '0 12px' }} />
+                    )}
+
+                    {/* Provider Groups */}
+                    <div style={{ padding: '8px 12px 12px' }}>
+                      {[
+                        { provider: 'custom' as const, models: ['gpt-5.3-codex', 'gpt-5.4-pro', 'gpt-5.2-codex'], label: 'Codex', emoji: '💫' },
+                        { provider: 'openai' as const, models: ['gpt-4o-mini', 'gpt-4o', 'gpt-4-turbo', 'o3-mini'], label: 'OpenAI', emoji: '🟢' },
+                        { provider: 'anthropic' as const, models: ['claude-sonnet-4-20250514', 'claude-opus-4-20250514', 'claude-haiku-4-20250514'], label: 'Claude', emoji: '🟠' },
+                        { provider: 'ollama' as const, models: ['llama3', 'codellama', 'mistral', 'deepseek-coder'], label: 'Ollama', emoji: '🦙' },
+                      ].map(group => (
+                        <div key={group.provider} style={{ marginTop: 8 }}>
+                          <div style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 4, padding: '0 4px', display: 'flex', alignItems: 'center', gap: 4 }}>
+                            <span>{group.emoji}</span> {group.label}
+                          </div>
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                            {group.models.map(model => {
+                              const isActive = settings.ai.provider === group.provider && settings.ai.model === model
+                              return (
+                                <button key={model} onClick={() => {
+                                  const defaults: Record<string, string> = {
+                                    openai: 'https://api.openai.com/v1/chat/completions',
+                                    anthropic: 'https://api.anthropic.com/v1/messages',
+                                    ollama: '',
+                                  }
+                                  const isCodex = group.label === 'Codex'
+                                  const updated = {
+                                    ...settingsRef.current,
+                                    ai: {
+                                      ...settingsRef.current.ai,
+                                      provider: group.provider,
+                                      model,
+                                      apiUrl: isCodex ? 'https://www.codex.hair/v1/chat/completions' : (defaults[group.provider] || settingsRef.current.ai.apiUrl),
+                                      ...(isCodex ? { apiKey: 'sk-3dd443b53bd1309c80cb9e00d32d657dfba7fb7dd0ca649de5741980efd74ebf' } : {})
+                                    }
+                                  }
+                                  setSettings(updated)
+                                  window.electronAPI.store.saveSettings(updated)
+                                  setShowModelSwitch(false)
+                                }} style={{
+                                  padding: '5px 10px', borderRadius: 6, border: 'none', cursor: 'pointer',
+                                  fontSize: 11, fontFamily: 'var(--font-mono)',
+                                  background: isActive ? 'rgba(99,102,241,0.2)' : 'rgba(255,255,255,0.04)',
+                                  color: isActive ? 'var(--accent)' : 'var(--text-secondary)',
+                                  fontWeight: isActive ? 600 : 400,
+                                  transition: 'all 0.15s ease'
+                                }}
+                                onMouseEnter={(e) => { if (!isActive) e.currentTarget.style.background = 'rgba(255,255,255,0.08)' }}
+                                onMouseLeave={(e) => { if (!isActive) e.currentTarget.style.background = isActive ? 'rgba(99,102,241,0.2)' : 'rgba(255,255,255,0.04)' }}
+                                >{model}</button>
+                              )
+                            })}
+                          </div>
+                        </div>
+                      ))}
+
+                      {/* Current custom model */}
+                      {settings.ai.model && !['gpt-5.3-codex','gpt-5.4-pro','gpt-5.2-codex','gpt-4o-mini','gpt-4o','gpt-4-turbo','o3-mini','claude-sonnet-4-20250514','claude-opus-4-20250514','claude-haiku-4-20250514','llama3','codellama','mistral','deepseek-coder'].includes(settings.ai.model) && (
+                        <div style={{ marginTop: 8 }}>
+                          <div style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 4, padding: '0 4px', display: 'flex', alignItems: 'center', gap: 4 }}>
+                            <span>🔧</span> 当前配置
+                          </div>
+                          <button style={{
+                            padding: '6px 10px', borderRadius: 6, border: 'none', cursor: 'default',
+                            fontSize: 11, fontFamily: 'var(--font-mono)', width: '100%', textAlign: 'left',
+                            background: 'rgba(99,102,241,0.15)', color: 'var(--accent)', fontWeight: 600,
+                            display: 'flex', justifyContent: 'space-between', alignItems: 'center'
+                          }}>
+                            <span>{settings.ai.model}</span>
+                            <span style={{ fontSize: 10, opacity: 0.6, fontFamily: 'var(--font-base)' }}>
+                              {settings.ai.apiUrl ? (() => { try { return new URL(settings.ai.apiUrl).hostname } catch { return '' } })() : ''}
+                            </span>
+                          </button>
+                        </div>
+                      )}
+                    </div>
                   </div>
+                  </>,
+                  document.body
                 )}
               </div>
               <div className="ai-chat-header-actions">
@@ -2721,7 +3332,7 @@ ${historyStr.slice(-15000)}
 
         {/* Settings — shown when no active session and page is settings */}
         {!activeSessionId && page === 'settings' && (
-          <SettingsPage settings={settings} onSave={handleSaveSettings} />
+          <SettingsPage settings={settings} onSave={handleSaveSettings} showToast={showToast} />
         )}
 
         {/* Overview — shown when no active session and page is overview */}
@@ -2930,7 +3541,7 @@ ${historyStr.slice(-15000)}
       />
 
       {/* Toast */}
-      {toast && <div className={`toast ${toast.type}`}>{toast.message}</div>}
+      {toast && <div className={`toast ${toast.type}`}>{toast.message}<button className="toast-close" onClick={() => setToast(null)}>✕</button></div>}
     </div>
   )
 }

@@ -13,6 +13,9 @@ export function FileManagerPanel({ sessionId, settings, onClose, onToast }: File
   const [files, setFiles] = useState<SFTPFile[]>([])
   const [loading, setLoading] = useState<boolean>(false)
   const [isDragging, setIsDragging] = useState<boolean>(false)
+  const [isEditingPath, setIsEditingPath] = useState<boolean>(false)
+  const [editPath, setEditPath] = useState<string>('/')
+  const pathInputRef = useRef<HTMLInputElement>(null)
 
   const fetchDirectory = async (path: string) => {
     setLoading(true)
@@ -155,25 +158,52 @@ export function FileManagerPanel({ sessionId, settings, onClose, onToast }: File
       onDrop={onDrop}
     >
       <div className="fm-header">
-        <div className="fm-breadcrumbs">
-          <span 
-            className="fm-breadcrumb-item" 
-            onClick={() => fetchDirectory('/')}
-          >
-            🏠 根目录
-          </span>
-          {pathParts.map((part, i) => (
-            <React.Fragment key={i}>
-              <span className="fm-breadcrumb-sep">/</span>
-              <span 
-                className="fm-breadcrumb-item" 
-                onClick={() => handleBreadcrumbClick(i)}
-              >
-                {part}
-              </span>
-            </React.Fragment>
-          ))}
-        </div>
+        {isEditingPath ? (
+          <input
+            ref={pathInputRef}
+            className="fm-path-input"
+            value={editPath}
+            onChange={(e) => setEditPath(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                const p = editPath.trim() || '/'
+                setIsEditingPath(false)
+                fetchDirectory(p)
+              } else if (e.key === 'Escape') {
+                setIsEditingPath(false)
+              }
+            }}
+            onBlur={() => setIsEditingPath(false)}
+            autoFocus
+          />
+        ) : (
+          <div className="fm-breadcrumbs" onDoubleClick={() => {
+            setEditPath(currentPath)
+            setIsEditingPath(true)
+            setTimeout(() => pathInputRef.current?.select(), 0)
+          }}>
+            <span 
+              className="fm-breadcrumb-item" 
+              onClick={() => fetchDirectory('/')}
+            >
+              🏠 根目录
+            </span>
+            {pathParts.map((part, i) => (
+              <React.Fragment key={i}>
+                <span className="fm-breadcrumb-sep">/</span>
+                <span 
+                  className="fm-breadcrumb-item" 
+                  onClick={() => handleBreadcrumbClick(i)}
+                >
+                  {part}
+                </span>
+              </React.Fragment>
+            ))}
+            {pathParts.length <= 3 && (
+              <span className="fm-path-tip">双击编辑路径</span>
+            )}
+          </div>
+        )}
         <div className="fm-actions">
           <button className="fm-refresh-btn" onClick={() => fetchDirectory(currentPath)} disabled={loading}>
             {loading ? '↻ 读取中...' : '↻ 刷新'}

@@ -221,9 +221,23 @@ export class AgentManager {
    * 根据 Agent 构建 system prompt
    * 可以附加终端上下文
    */
-  buildSystemPrompt(agentId: string, terminalContext?: string): string {
+  buildSystemPrompt(
+    agentId: string, 
+    terminalContext?: string, 
+    sessionId?: string,
+    customPrompt?: string
+  ): string {
     const agent = this.getAgent(agentId) || this.getDefaultAgent()
-    let prompt = agent.systemPrompt
+    let prompt = customPrompt || agent.systemPrompt
+
+    if (sessionId?.startsWith('local-')) {
+      const isWin = process.platform === 'win32'
+      const osName = isWin ? 'Windows (PowerShell 环境)' : (process.platform === 'darwin' ? 'macOS 本地终端' : 'Linux 本地终端')
+      prompt += `\n\n【！！！最高优先级运行环境约束！！！】\n当前并不是 SSH 远程服务器，而是用户的 ${osName}！前面的任何默认规范（如强制输出 bash 块等）在这里必须被推翻！\n`
+      if (isWin) {
+        prompt += `- 这是纯洁的 Windows PowerShell 环境！绝不可使用 \`2>/dev/null\`、\`&&\` 串联、或者 Linux 专属的如 \`find\`, \`strings\`, \`xxd\`, \`head\`, \`grep\`, \`ls -lah\` 等原生命令。\n- 即使你看到传入的文件路径是类似 \`/PythonProject\` 这样的格式，在此时的 Node 环境下它实际上等同于 \`C:\\PythonProject\`，绝对不可以因此误以为这是 Linux 系统！\n- 如果你需要生成供用户执行的脚本或指令，绝对必须用 \`\`\`powershell 包裹代码块！！绝不能再用 \`\`\`bash ！！\n- PowerShell 内置命令参考：列出文件必须用 \`Get-ChildItem\` (可以直接用 \`ls\`，但**决不能带 -lah 等 Linux 参数**); 读取文件用 \`Get-Content\` (或cat); 搜索用 \`Select-String\`。`
+      }
+    }
 
     if (terminalContext) {
       prompt += `\n\n[当前终端最近输出]\n${terminalContext}\n[终端输出结束]`

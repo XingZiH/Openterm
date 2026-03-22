@@ -21,6 +21,7 @@ export interface Session {
   name: string
   host: string
   status: 'connecting' | 'connected' | 'disconnected' | 'error'
+  isLocal?: boolean
 }
 
 export interface AiMessage {
@@ -32,7 +33,20 @@ export interface AiMessage {
   agentId?: string          // 产生此消息的 Agent
 }
 
-export type AiProvider = 'openai' | 'anthropic' | 'ollama' | 'custom'
+export type AiProvider = 'openai' | 'anthropic' | 'ollama' | 'custom' | 'deepseek' | 'kimi' | 'qwen' | 'gemini' | 'groq' | 'xai' | 'custom-anthropic'
+
+export interface AiProfile {
+  provider: AiProvider
+  apiKey?: string
+  apiUrl?: string
+  model?: string
+  models?: string[]
+  ollamaUrl?: string
+  customPrompt?: string
+  temperature?: number
+  maxTokens?: number
+  topP?: number
+}
 
 export interface AiSettings {
   provider: AiProvider
@@ -41,6 +55,11 @@ export interface AiSettings {
   model: string
   ollamaUrl: string
   customPrompt?: string
+  temperature?: number
+  maxTokens?: number
+  topP?: number
+  profiles?: Record<string, AiProfile>
+  activeProfile?: string
 }
 
 export interface ChatHistoryEntry {
@@ -189,7 +208,7 @@ export function isDangerousCommand(cmd: string): boolean {
 }
 
 export function extractCommands(text: string): string[] {
-  const codeBlockRegex = /```(?:bash|sh|shell|zsh)?\s*\n([\s\S]*?)```/g
+  const codeBlockRegex = /```(?:bash|sh|shell|zsh|powershell|ps1|bat|cmd)?\w*\s*\n([\s\S]*?)```/g
   const commands: string[] = []
   let match: RegExpExecArray | null
   while ((match = codeBlockRegex.exec(text)) !== null) {
@@ -224,6 +243,7 @@ declare global {
       }
       file: {
         readAsDataUrl: (filePath: string) => Promise<string | null>
+        readForAi: (sessionId: string, path: string, type: 'file' | 'dir') => Promise<{ success: boolean; output?: string; error?: string }>
       }
       ssh: {
         connect: (config: any) => Promise<{ success: boolean; sessionId?: string; error?: string }>
@@ -247,6 +267,7 @@ declare global {
         importSkills: (skills: AgentSkill[]) => Promise<void>
       }
       ai: {
+        testConnection: (settings: any) => Promise<{ success: boolean; error?: string }>
         chat: (
           messages: any[],
           settings: any,
@@ -281,6 +302,14 @@ declare global {
         getPlatform: () => Promise<string>
         getSize: () => Promise<number[]>
         setSize: (width: number, height: number) => void
+      }
+      pty: {
+        spawn: (id: string, cwd?: string) => Promise<{ success: boolean; error?: string }>
+        write: (id: string, data: string) => void
+        resize: (id: string, cols: number, rows: number) => void
+        kill: (id: string) => Promise<{ success: boolean }>
+        onData: (callback: (id: string, data: string) => void) => () => void
+        onExit: (callback: (id: string, exitCode: number) => void) => () => void
       }
     }
   }
