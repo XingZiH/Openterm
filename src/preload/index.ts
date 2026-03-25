@@ -39,6 +39,18 @@ export interface ElectronAPI {
     ls: (sessionId: string, remotePath: string) => Promise<{ success: boolean; data?: any[]; error?: string }>
     download: (sessionId: string, remotePath: string, localPath: string) => Promise<{ success: boolean; error?: string }>
     upload: (sessionId: string, localPath: string, remotePath: string) => Promise<{ success: boolean; error?: string }>
+    move: (sessionId: string, srcPath: string, destPath: string) => Promise<{ success: boolean; error?: string }>
+    copy: (sessionId: string, srcPath: string, destPath: string) => Promise<{ success: boolean; error?: string }>
+    delete: (sessionId: string, targetPath: string) => Promise<{ success: boolean; error?: string }>
+    rename: (sessionId: string, oldPath: string, newPath: string) => Promise<{ success: boolean; error?: string }>
+    createFile: (sessionId: string, filePath: string) => Promise<{ success: boolean; error?: string }>
+    mkdir: (sessionId: string, dirPath: string) => Promise<{ success: boolean; error?: string }>
+    readFile: (sessionId: string, filePath: string) => Promise<{ success: boolean; content?: string; size?: number; error?: string }>
+    writeFile: (sessionId: string, filePath: string, content: string) => Promise<{ success: boolean; error?: string }>
+  }
+  clipboard: {
+    readText: () => Promise<string>
+    writeText: (text: string) => Promise<void>
   }
   dialog: {
     openFile: (options: any) => Promise<{ canceled: boolean; filePaths: string[] }>
@@ -143,7 +155,19 @@ const api: ElectronAPI = {
   sftp: {
     ls: (sessionId, remotePath) => ipcRenderer.invoke('sftp:ls', sessionId, remotePath),
     download: (sessionId, remotePath, localPath) => ipcRenderer.invoke('sftp:download', sessionId, remotePath, localPath),
-    upload: (sessionId, localPath, remotePath) => ipcRenderer.invoke('sftp:upload', sessionId, localPath, remotePath)
+    upload: (sessionId, localPath, remotePath) => ipcRenderer.invoke('sftp:upload', sessionId, localPath, remotePath),
+    move: (sessionId, srcPath, destPath) => ipcRenderer.invoke('sftp:move', sessionId, srcPath, destPath),
+    copy: (sessionId, srcPath, destPath) => ipcRenderer.invoke('sftp:copy', sessionId, srcPath, destPath),
+    delete: (sessionId, targetPath) => ipcRenderer.invoke('sftp:delete', sessionId, targetPath),
+    rename: (sessionId, oldPath, newPath) => ipcRenderer.invoke('sftp:rename', sessionId, oldPath, newPath),
+    createFile: (sessionId, filePath) => ipcRenderer.invoke('sftp:createFile', sessionId, filePath),
+    mkdir: (sessionId, dirPath) => ipcRenderer.invoke('sftp:mkdir', sessionId, dirPath),
+    readFile: (sessionId, filePath) => ipcRenderer.invoke('sftp:readFile', sessionId, filePath),
+    writeFile: (sessionId, filePath, content) => ipcRenderer.invoke('sftp:writeFile', sessionId, filePath, content)
+  },
+  clipboard: {
+    readText: () => ipcRenderer.invoke('clipboard:readText'),
+    writeText: (text) => ipcRenderer.invoke('clipboard:writeText', text)
   },
   dialog: {
     openFile: (options) => ipcRenderer.invoke('dialog:openFile', options),

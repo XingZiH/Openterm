@@ -223,6 +223,30 @@ export class SSHManager extends EventEmitter {
     })
   }
 
+  async sftpMove(sessionId: string, srcPath: string, destPath: string): Promise<void> {
+    const sftp = await this.getSftp(sessionId)
+    return new Promise((resolve, reject) => {
+      sftp.rename(srcPath, destPath, (err: Error | undefined) => {
+        if (err) return reject(err)
+        resolve()
+      })
+    })
+  }
+
+  async sftpCopy(sessionId: string, srcPath: string, destPath: string): Promise<void> {
+    const sftp = await this.getSftp(sessionId)
+    return new Promise((resolve, reject) => {
+      const readStream = sftp.createReadStream(srcPath)
+      const writeStream = sftp.createWriteStream(destPath)
+
+      readStream.on('error', (err: Error) => reject(err))
+      writeStream.on('error', (err: Error) => reject(err))
+      writeStream.on('close', () => resolve())
+
+      readStream.pipe(writeStream)
+    })
+  }
+
   getActiveSessions(): string[] {
     return Array.from(this.sessions.keys())
   }

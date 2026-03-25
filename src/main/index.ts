@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, shell, safeStorage, dialog } from 'electron'
+import { app, BrowserWindow, ipcMain, shell, safeStorage, dialog, clipboard } from 'electron'
 import { join } from 'path'
 import { readFileSync, promises as fsPromises } from 'fs'
 import { exec } from 'child_process'
@@ -305,6 +305,32 @@ ipcMain.handle('sftp:upload', async (_e, sessionId: string, localPath: string, r
   }
 })
 
+ipcMain.handle('sftp:move', async (_e, sessionId: string, srcPath: string, destPath: string) => {
+  try {
+    if (sessionId.startsWith('local-')) {
+      await localFileManager.move(srcPath, destPath)
+      return { success: true }
+    }
+    await sshManager.sftpMove(sessionId, srcPath, destPath)
+    return { success: true }
+  } catch (err: any) {
+    return { success: false, error: err.message }
+  }
+})
+
+ipcMain.handle('sftp:copy', async (_e, sessionId: string, srcPath: string, destPath: string) => {
+  try {
+    if (sessionId.startsWith('local-')) {
+      await localFileManager.copy(srcPath, destPath)
+      return { success: true }
+    }
+    await sshManager.sftpCopy(sessionId, srcPath, destPath)
+    return { success: true }
+  } catch (err: any) {
+    return { success: false, error: err.message }
+  }
+})
+
 // --- IPC: Read file as data URL ---
 ipcMain.handle('file:readAsDataUrl', async (_e, filePath: string) => {
   try {
@@ -354,6 +380,179 @@ localPtyManager.on('data', (id: string, data: string) => {
 localPtyManager.on('exit', (id: string, exitCode: number) => {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('pty:exit', id, exitCode)
+  }
+})
+
+// --- IPC: Clipboard ---
+ipcMain.handle('clipboard:readText', () => clipboard.readText())
+ipcMain.handle('clipboard:writeText', (_e, text: string) => clipboard.writeText(text))
+
+// Shell-escape a string for use inside double quotes (防注入)
+function shellEscape(s: string): string {
+  // 先过滤换行符/回车符防止命令注入，再转义 shell 元字符
+  return s.replace(/[\r\n]/g, '').replace(/[\\"$`!]/g, '\\$&')
+}
+
+// --- IPC: SFTP Delete ---
+ipcMain.handle('sftp:delete', async (_e, sessionId: string, targetPath: string) => {
+  try {
+    if (sessionId.startsWith('local-')) {
+      const stat = await fsPromises.stat(targetPath)
+      if (stat.isDirectory()) {
+        await fsPromises.rm(targetPath, { recursive: true })
+      } else {
+        await fsPromises.unlink(targetPath)
+      }
+      return { success: true }
+    }
+    await sshManager.exec(sessionId, `rm -rf "${shellEscape(targetPath)}"`)
+    return { success: true }
+  } catch (err: any) {
+    return { success: false, error: err.message }
+  }
+})
+
+// --- IPC: SFTP Rename ---
+ipcMain.handle('sftp:rename', async (_e, sessionId: string, oldPath: string, newPath: string) => {
+  try {
+    if (sessionId.startsWith('local-')) {
+      await fsPromises.rename(oldPath, newPath)
+      return { success: true }
+    }
+    await sshManager.exec(sessionId, `mv "${shellEscape(oldPath)}" "${shellEscape(newPath)}"`)
+    return { success: true }
+  } catch (err: any) {
+    return { success: false, error: err.message }
+  }
+})
+
+// Validate that a filename (last segment) is safe — no path traversal or illegal chars
+function validateFileName(filePath: string): void {
+  const name = filePath.split('/').pop() || ''
+  if (!name || name === '.' || name === '..' || name.includes('/') || name.includes('\\') || name.includes('\0')) {
+    throw new Error(`非法文件名: "${name}"`)
+  }
+}
+
+// --- IPC: SFTP Create File ---
+ipcMain.handle('sftp:createFile', async (_e, sessionId: string, filePath: string) => {
+  try {
+    validateFileName(filePath)
+    if (sessionId.startsWith('local-')) {
+      await fsPromises.writeFile(filePath, '', { flag: 'wx' })
+      return { success: true }
+    }
+    // 远程先检查是否存在，不存在时才创建（与本地 'wx' 行为一致）
+    try {
+      const checkResult = await sshManager.exec(sessionId, `test -e "${shellEscape(filePath)}" && echo EXISTS || echo NOT_EXISTS`)
+      if (checkResult.trim() === 'EXISTS') {
+        return { success: false, error: '文件已存在' }
+      }
+    } catch {
+      // test 命令失败视为不存在，继续创建
+    }
+    await sshManager.exec(sessionId, `touch "${shellEscape(filePath)}"`)
+    return { success: true }
+  } catch (err: any) {
+    return { success: false, error: err.message }
+  }
+})
+
+// --- IPC: SFTP Mkdir ---
+ipcMain.handle('sftp:mkdir', async (_e, sessionId: string, dirPath: string) => {
+  try {
+    validateFileName(dirPath)
+    if (sessionId.startsWith('local-')) {
+      await fsPromises.mkdir(dirPath)
+      return { success: true }
+    }
+    await sshManager.exec(sessionId, `mkdir "${shellEscape(dirPath)}"`)
+    return { success: true }
+  } catch (err: any) {
+    return { success: false, error: err.message }
+  }
+})
+
+const MAX_EDIT_FILE_SIZE = 5 * 1024 * 1024 // 5MB 编辑上限
+
+// --- IPC: SFTP Read File (for editor) ---
+ipcMain.handle('sftp:readFile', async (_e, sessionId: string, filePath: string) => {
+  try {
+    if (sessionId.startsWith('local-')) {
+      const stat = await fsPromises.stat(filePath)
+      if (stat.size > MAX_EDIT_FILE_SIZE) {
+        return { success: false, error: `文件过大 (${(stat.size / 1024 / 1024).toFixed(1)}MB)，编辑上限为 5MB` }
+      }
+      // 先以 Buffer 读取检测二进制（检查前 8KB 是否含 \0）
+      if (stat.size > 0) {
+        const fd = await fsPromises.open(filePath, 'r')
+        const probe = Buffer.alloc(Math.min(stat.size, 8192))
+        await fd.read(probe, 0, probe.length, 0)
+        await fd.close()
+        if (probe.includes(0)) {
+          return { success: false, error: '这是一个二进制文件，不支持编辑' }
+        }
+      }
+      const content = await fsPromises.readFile(filePath, 'utf-8')
+      return { success: true, content, size: stat.size }
+    }
+    // 远程: 合并 stat + file + cat 为单条命令，减少 SSH 往返延迟
+    const escaped = shellEscape(filePath)
+    const combined = await sshManager.exec(sessionId,
+      `SIZE=$(stat -c%s "${escaped}" 2>/dev/null || wc -c < "${escaped}"); ` +
+      `echo "---SIZE:$SIZE---"; ` +
+      `if [ "$SIZE" -gt ${MAX_EDIT_FILE_SIZE} ]; then echo "---TOO_LARGE---"; exit 0; fi; ` +
+      `if [ "$SIZE" -gt 0 ]; then ` +
+        `FTYPE=$(file -b --mime-encoding "${escaped}" 2>/dev/null || echo "unknown"); ` +
+        `if [ "$FTYPE" = "binary" ]; then echo "---BINARY---"; exit 0; fi; ` +
+      `fi; ` +
+      `echo "---CONTENT_START---"; cat "${escaped}"`
+    )
+    // 解析合并输出
+    const sizeMatch = combined.match(/---SIZE:(\d+)---/)
+    const size = sizeMatch ? parseInt(sizeMatch[1], 10) : 0
+    if (combined.includes('---TOO_LARGE---')) {
+      return { success: false, error: `文件过大 (${(size / 1024 / 1024).toFixed(1)}MB)，编辑上限为 5MB` }
+    }
+    if (combined.includes('---BINARY---')) {
+      return { success: false, error: '这是一个二进制文件，不支持编辑' }
+    }
+    const contentStart = combined.indexOf('---CONTENT_START---\n')
+    const content = contentStart >= 0 ? combined.substring(contentStart + '---CONTENT_START---\n'.length) : ''
+    return { success: true, content, size }
+  } catch (err: any) {
+    return { success: false, error: err.message }
+  }
+})
+
+// --- IPC: SFTP Write File (for editor) ---
+ipcMain.handle('sftp:writeFile', async (_e, sessionId: string, filePath: string, content: string) => {
+  try {
+    if (sessionId.startsWith('local-')) {
+      await fsPromises.writeFile(filePath, content, 'utf-8')
+      return { success: true }
+    }
+    // 远程: 分块 base64 传输，避免命令行长度限制
+    const escapedPath = shellEscape(filePath)
+    if (content.length === 0) {
+      // 空文件直接截断
+      await sshManager.exec(sessionId, `truncate -s 0 "${escapedPath}" 2>/dev/null || printf '' > "${escapedPath}"`)
+      return { success: true }
+    }
+    const b64 = Buffer.from(content, 'utf-8').toString('base64')
+    const CHUNK_SIZE = 65536 // 64KB per chunk (safe for most shells)
+    // 第一块用 > 覆盖，后续块用 >> 追加
+    for (let i = 0; i < b64.length; i += CHUNK_SIZE) {
+      const chunk = b64.substring(i, i + CHUNK_SIZE)
+      const op = i === 0 ? '>' : '>>'
+      await sshManager.exec(sessionId, `printf '%s' '${chunk}' ${op} /tmp/.openterm_edit_tmp`)
+    }
+    await sshManager.exec(sessionId, `base64 -d /tmp/.openterm_edit_tmp > "${escapedPath}" && rm -f /tmp/.openterm_edit_tmp`)
+    return { success: true }
+  } catch (err: any) {
+    // 清理临时文件
+    try { await sshManager.exec(sessionId, 'rm -f /tmp/.openterm_edit_tmp') } catch {}
+    return { success: false, error: err.message }
   }
 })
 

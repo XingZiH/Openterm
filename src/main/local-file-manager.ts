@@ -79,6 +79,14 @@ export class LocalFileManager {
     await fs.copyFile(localPath, remotePath)
   }
 
+  async move(srcPath: string, destPath: string): Promise<void> {
+    await fs.rename(srcPath, destPath)
+  }
+
+  async copy(srcPath: string, destPath: string): Promise<void> {
+    await fs.copyFile(srcPath, destPath)
+  }
+
   private modeToPermissions(mode: number, isDir: boolean, isSymlink: boolean): string {
     const type = isDir ? 'd' : isSymlink ? 'l' : '-'
     const owner = (mode & 0o400 ? 'r' : '-') + (mode & 0o200 ? 'w' : '-') + (mode & 0o100 ? 'x' : '-')

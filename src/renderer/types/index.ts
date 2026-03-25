@@ -236,6 +236,18 @@ declare global {
         ls: (sessionId: string, remotePath: string) => Promise<{ success: boolean; data?: SFTPFile[]; error?: string }>
         download: (sessionId: string, remotePath: string, localPath: string) => Promise<{ success: boolean; error?: string }>
         upload: (sessionId: string, localPath: string, remotePath: string) => Promise<{ success: boolean; error?: string }>
+        move: (sessionId: string, srcPath: string, destPath: string) => Promise<{ success: boolean; error?: string }>
+        copy: (sessionId: string, srcPath: string, destPath: string) => Promise<{ success: boolean; error?: string }>
+        delete: (sessionId: string, targetPath: string) => Promise<{ success: boolean; error?: string }>
+        rename: (sessionId: string, oldPath: string, newPath: string) => Promise<{ success: boolean; error?: string }>
+        createFile: (sessionId: string, filePath: string) => Promise<{ success: boolean; error?: string }>
+        mkdir: (sessionId: string, dirPath: string) => Promise<{ success: boolean; error?: string }>
+        readFile: (sessionId: string, filePath: string) => Promise<{ success: boolean; content?: string; size?: number; error?: string }>
+        writeFile: (sessionId: string, filePath: string, content: string) => Promise<{ success: boolean; error?: string }>
+      }
+      clipboard: {
+        readText: () => Promise<string>
+        writeText: (text: string) => Promise<void>
       }
       dialog: {
         selectDirectory: () => Promise<{ canceled: boolean; filePaths: string[] }>

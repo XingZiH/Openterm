@@ -6,9 +6,14 @@ interface FileManagerPanelProps {
   settings: any
   onClose?: () => void
   onToast: (msg: string, type: 'success' | 'error' | 'info') => void
+  reloadToken?: number
+  onStateChange?: (state: { currentPath?: string; selectedFile?: SFTPFile | null }) => void
+  onContextMenuRequest?: (event: React.MouseEvent, ctx: { currentPath: string; file?: SFTPFile }) => void
+  cutFilePath?: string | null
+  onEditFile?: (filePath: string, fileName: string) => void
 }
 
-export function FileManagerPanel({ sessionId, settings, onClose, onToast }: FileManagerPanelProps) {
+export function FileManagerPanel({ sessionId, settings, onClose, onToast, reloadToken = 0, onStateChange, onContextMenuRequest, cutFilePath, onEditFile }: FileManagerPanelProps) {
   const [currentPath, setCurrentPath] = useState<string>('/')
   const [files, setFiles] = useState<SFTPFile[]>([])
   const [loading, setLoading] = useState<boolean>(false)
@@ -16,6 +21,10 @@ export function FileManagerPanel({ sessionId, settings, onClose, onToast }: File
   const [isEditingPath, setIsEditingPath] = useState<boolean>(false)
   const [editPath, setEditPath] = useState<string>('/')
   const pathInputRef = useRef<HTMLInputElement>(null)
+  const [selectedName, setSelectedName] = useState<string | null>(null)
+  const [renamingFile, setRenamingFile] = useState<string | null>(null)
+  const [renameValue, setRenameValue] = useState('')
+  const renameInputRef = useRef<HTMLInputElement>(null)
 
   const fetchDirectory = async (path: string) => {
     setLoading(true)
@@ -23,7 +32,10 @@ export function FileManagerPanel({ sessionId, settings, onClose, onToast }: File
       const res = await window.electronAPI.sftp.ls(sessionId, path)
       if (res.success && res.data) {
         setFiles(res.data)
-        setCurrentPath(path.replace(/\/+/g, '/'))
+        const normalized = path.replace(/\/+/g, '/')
+        setCurrentPath(normalized)
+        setSelectedName(null)
+        onStateChange?.({ currentPath: normalized, selectedFile: null })
       } else {
         onToast(`读取目录失败: ${res.error}`, 'error')
       }
@@ -38,7 +50,13 @@ export function FileManagerPanel({ sessionId, settings, onClose, onToast }: File
     if (sessionId) {
       fetchDirectory(currentPath)
     }
-  }, [sessionId])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId, reloadToken])
+
+  useEffect(() => {
+    setSelectedName(null)
+    onStateChange?.({ selectedFile: null })
+  }, [sessionId, onStateChange])
 
   const handleDoubleClick = async (file: SFTPFile) => {
     if (file.name === '..') {
@@ -52,26 +70,31 @@ export function FileManagerPanel({ sessionId, settings, onClose, onToast }: File
     if (file.type === 'd') {
       fetchDirectory(targetPath)
     } else {
-      // Download file
-      let localPath = ''
-      if (settings?.defaultDownloadPath) {
-        localPath = `${settings.defaultDownloadPath}\\${file.name}`
+      // 双击文件：优先打开编辑器
+      if (onEditFile) {
+        onEditFile(targetPath, file.name)
       } else {
-        const res = await window.electronAPI.dialog.selectDirectory()
-        if (res.canceled || !res.filePaths.length) return
-        localPath = `${res.filePaths[0]}\\${file.name}`
-      }
-
-      onToast(`开始下载 ${file.name}...`, 'info')
-      try {
-        const downloadRes = await window.electronAPI.sftp.download(sessionId, targetPath, localPath)
-        if (downloadRes.success) {
-          onToast(`下载成功: ${localPath}`, 'success')
+        // 回退：下载文件
+        let localPath = ''
+        if (settings?.defaultDownloadPath) {
+          localPath = `${settings.defaultDownloadPath}\\${file.name}`
         } else {
-          onToast(`下载失败: ${downloadRes.error}`, 'error')
+          const res = await window.electronAPI.dialog.selectDirectory()
+          if (res.canceled || !res.filePaths.length) return
+          localPath = `${res.filePaths[0]}\\${file.name}`
         }
-      } catch (err: any) {
-        onToast(`下载异常: ${err.message}`, 'error')
+
+        onToast(`开始下载 ${file.name}...`, 'info')
+        try {
+          const downloadRes = await window.electronAPI.sftp.download(sessionId, targetPath, localPath)
+          if (downloadRes.success) {
+            onToast(`下载成功: ${localPath}`, 'success')
+          } else {
+            onToast(`下载失败: ${downloadRes.error}`, 'error')
+          }
+        } catch (err: any) {
+          onToast(`下载异常: ${err.message}`, 'error')
+        }
       }
     }
   }
@@ -105,7 +128,7 @@ export function FileManagerPanel({ sessionId, settings, onClose, onToast }: File
     for (const file of items) {
       const localPath = file.path
       const remotePath = currentPath.endsWith('/') ? `${currentPath}${file.name}` : `${currentPath}/${file.name}`
-      
+
       onToast(`开始上传 ${file.name}...`, 'info')
       try {
         const uploadRes = await window.electronAPI.sftp.upload(sessionId, localPath, remotePath)
@@ -118,7 +141,7 @@ export function FileManagerPanel({ sessionId, settings, onClose, onToast }: File
         onToast(`上传异常: ${err.message}`, 'error')
       }
     }
-    
+
     // Refresh directory after uploads
     fetchDirectory(currentPath)
   }
@@ -148,14 +171,54 @@ export function FileManagerPanel({ sessionId, settings, onClose, onToast }: File
     return '📄'
   }
 
+  const startRename = (fileName: string) => {
+    setRenamingFile(fileName)
+    setRenameValue(fileName)
+    setTimeout(() => renameInputRef.current?.select(), 0)
+  }
+
+  const submitRename = async () => {
+    if (!renamingFile || !renameValue.trim() || renameValue === renamingFile) {
+      setRenamingFile(null)
+      return
+    }
+    const oldPath = currentPath.endsWith('/') ? `${currentPath}${renamingFile}` : `${currentPath}/${renamingFile}`
+    const newPath = currentPath.endsWith('/') ? `${currentPath}${renameValue.trim()}` : `${currentPath}/${renameValue.trim()}`
+    try {
+      const res = await window.electronAPI.sftp.rename(sessionId, oldPath, newPath)
+      if (res.success) {
+        onToast(`重命名成功: ${renameValue.trim()}`, 'success')
+        fetchDirectory(currentPath)
+      } else {
+        onToast(`重命名失败: ${res.error}`, 'error')
+      }
+    } catch (err: any) {
+      onToast(`重命名异常: ${err.message}`, 'error')
+    }
+    setRenamingFile(null)
+  }
+
+  // Expose methods for parent component
+  const getCurrentPath = () => currentPath
+  const refresh = () => fetchDirectory(currentPath)
+  ;(window as any).__fileManagerPanel = { startRename, getCurrentPath, refresh }
+
   const pathParts = currentPath.split('/').filter(Boolean)
 
   return (
-    <div 
+    <div
       className={`file-manager-panel ${isDragging ? 'dragging' : ''}`}
+      tabIndex={0}
       onDragOver={onDragOver}
       onDragLeave={onDragLeave}
       onDrop={onDrop}
+      onContextMenu={(e) => {
+        e.preventDefault()
+        e.stopPropagation()
+        setSelectedName(null)
+        onStateChange?.({ selectedFile: null })
+        onContextMenuRequest?.(e, { currentPath })
+      }}
     >
       <div className="fm-header">
         {isEditingPath ? (
@@ -182,8 +245,8 @@ export function FileManagerPanel({ sessionId, settings, onClose, onToast }: File
             setIsEditingPath(true)
             setTimeout(() => pathInputRef.current?.select(), 0)
           }}>
-            <span 
-              className="fm-breadcrumb-item" 
+            <span
+              className="fm-breadcrumb-item"
               onClick={() => fetchDirectory('/')}
             >
               🏠 根目录
@@ -191,8 +254,8 @@ export function FileManagerPanel({ sessionId, settings, onClose, onToast }: File
             {pathParts.map((part, i) => (
               <React.Fragment key={i}>
                 <span className="fm-breadcrumb-sep">/</span>
-                <span 
-                  className="fm-breadcrumb-item" 
+                <span
+                  className="fm-breadcrumb-item"
                   onClick={() => handleBreadcrumbClick(i)}
                 >
                   {part}
@@ -229,11 +292,37 @@ export function FileManagerPanel({ sessionId, settings, onClose, onToast }: File
           <tbody>
             {files.map(file => {
               const isDraggable = file.name !== '..'
+              const isSelected = selectedName === file.name
+              const filePath = currentPath.endsWith('/') ? `${currentPath}${file.name}` : `${currentPath}/${file.name}`
+              const isCutTarget = cutFilePath === filePath
               return (
-                <tr 
-                  key={file.name} 
-                  className="fm-file-row" 
+                <tr
+                  key={file.name}
+                  className={`fm-file-row${isSelected ? ' selected' : ''}${isCutTarget ? ' cut-pending' : ''}`}
                   draggable={isDraggable}
+                  onClick={() => {
+                    if (file.name === '..') {
+                      setSelectedName(null)
+                      onStateChange?.({ selectedFile: null })
+                    } else {
+                      setSelectedName(file.name)
+                      onStateChange?.({ selectedFile: file })
+                    }
+                  }}
+                  onContextMenu={(e) => {
+                    e.preventDefault()
+                    e.stopPropagation()
+                    if (file.name !== '..') {
+                      if (!isSelected) {
+                        setSelectedName(file.name)
+                        onStateChange?.({ selectedFile: file })
+                      }
+                    } else {
+                      setSelectedName(null)
+                      onStateChange?.({ selectedFile: null })
+                    }
+                    onContextMenuRequest?.(e, { currentPath, file: file.name === '..' ? undefined : file })
+                  }}
                   onDragStart={(e) => {
                     if (!isDraggable) {
                       e.preventDefault()
@@ -247,7 +336,23 @@ export function FileManagerPanel({ sessionId, settings, onClose, onToast }: File
                 >
                   <td className="td-name">
                     <span className="fm-icon">{getFileIcon(file)}</span>
-                    <span className="fm-filename">{file.name}</span>
+                    {renamingFile === file.name ? (
+                      <input
+                        ref={renameInputRef}
+                        className="fm-rename-input"
+                        value={renameValue}
+                        onChange={(e) => setRenameValue(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') submitRename()
+                          else if (e.key === 'Escape') setRenamingFile(null)
+                        }}
+                        onBlur={() => submitRename()}
+                        autoFocus
+                        onClick={(e) => e.stopPropagation()}
+                      />
+                    ) : (
+                      <span className="fm-filename">{file.name}</span>
+                    )}
                   </td>
                   <td className="td-size">{formatSize(file.size)}</td>
                   <td className="td-perms">{file.permissions}</td>
@@ -262,7 +367,7 @@ export function FileManagerPanel({ sessionId, settings, onClose, onToast }: File
             )}
           </tbody>
         </table>
-        
+
         {isDragging && (
           <div className="fm-drop-overlay">
             <div className="fm-drop-message">
