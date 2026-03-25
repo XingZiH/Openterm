@@ -384,7 +384,8 @@ function SettingsPage({
             <option value="dracula">Dracula</option>
             <option value="monokai">Monokai</option>
             <option value="nord">Nord</option>
-            <option value="solarized">Solarized Dark</option>
+            <option value="solarized-dark">Solarized Dark</option>
+            <option value="one-dark">One Dark</option>
             <option value="gruvbox">Gruvbox</option>
           </select>
         </div>
@@ -1096,7 +1097,8 @@ export default function App() {
           if (s.termBgImage) setTermBgImage(s.termBgImage)
           if (s.termFontSize != null) setTermFontSize(s.termFontSize)
           if (s.termLineHeight != null) setTermLineHeight(s.termLineHeight)
-          if (s.termTheme) setTermTheme(s.termTheme)
+          const normalizedTermTheme = s.termTheme === 'solarized' ? 'solarized-dark' : s.termTheme
+          if (normalizedTermTheme) setTermTheme(normalizedTermTheme)
           if (s.termCursorStyle) setTermCursorStyle(s.termCursorStyle)
           if (s.termCursorBlink != null) setTermCursorBlink(s.termCursorBlink)
           if (s.termOpacity != null) setTermOpacity(s.termOpacity)
