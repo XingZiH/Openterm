@@ -4190,6 +4190,8 @@ textarea.form-input {
   z-index: 99999;
   min-width: 180px;
   max-width: 280px;
+  max-height: calc(100vh - 8px);
+  overflow-y: auto;
   padding: 4px 0;
   background: var(--bg-tertiary, #1c2333);
   border: 1px solid var(--border-primary, #30363d);

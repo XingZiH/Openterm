@@ -319,6 +319,36 @@ declare global {
         onData: (callback: (id: string, data: string) => void) => () => void
         onExit: (callback: (id: string, exitCode: number) => void) => () => void
       }
+      nativeMenu: {
+        openFileContextMenu: (payload: {
+          requestId: string
+          x: number
+          y: number
+          items: Array<{
+            id: string
+            label?: string
+            shortcut?: string
+            type?: 'normal' | 'separator'
+            enabled?: boolean
+            danger?: boolean
+          }>
+        }) => Promise<{ success: boolean; error?: string }>
+        hideFileContextMenu: () => void
+        onFileMenuAction: (callback: (requestId: string, actionId: string) => void) => () => void
+        onFileContextRender: (callback: (payload: {
+          requestId: string
+          items: Array<{
+            id: string
+            label: string
+            shortcut?: string
+            type: 'normal' | 'separator'
+            enabled: boolean
+            danger: boolean
+          }>
+        }) => void) => () => void
+        sendFileContextAction: (requestId: string, actionId: string) => void
+        notifyFileContextReady: () => void
+      }
     }
   }
 }

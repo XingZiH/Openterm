@@ -85,6 +85,36 @@ export interface ElectronAPI {
     onData: (callback: (id: string, data: string) => void) => () => void
     onExit: (callback: (id: string, exitCode: number) => void) => () => void
   }
+  nativeMenu: {
+    openFileContextMenu: (payload: {
+      requestId: string
+      x: number
+      y: number
+      items: Array<{
+        id: string
+        label?: string
+        shortcut?: string
+        type?: 'normal' | 'separator'
+        enabled?: boolean
+        danger?: boolean
+      }>
+    }) => Promise<{ success: boolean; error?: string }>
+    hideFileContextMenu: () => void
+    onFileMenuAction: (callback: (requestId: string, actionId: string) => void) => () => void
+    onFileContextRender: (callback: (payload: {
+      requestId: string
+      items: Array<{
+        id: string
+        label: string
+        shortcut?: string
+        type: 'normal' | 'separator'
+        enabled: boolean
+        danger: boolean
+      }>
+    }) => void) => () => void
+    sendFileContextAction: (requestId: string, actionId: string) => void
+    notifyFileContextReady: () => void
+  }
   config: {
     getPath: () => Promise<string>
     openFile: () => Promise<{ success: boolean; path: string }>
@@ -210,6 +240,32 @@ const api: ElectronAPI = {
       ipcRenderer.on('pty:exit', handler)
       return () => ipcRenderer.removeListener('pty:exit', handler)
     }
+  },
+  nativeMenu: {
+    openFileContextMenu: (payload) => ipcRenderer.invoke('menu:fileContext:open', payload),
+    hideFileContextMenu: () => ipcRenderer.send('menu:fileContext:hide'),
+    onFileMenuAction: (callback) => {
+      const handler = (_: any, requestId: string, actionId: string) => callback(requestId, actionId)
+      ipcRenderer.on('menu:fileContext:action', handler)
+      return () => ipcRenderer.removeListener('menu:fileContext:action', handler)
+    },
+    onFileContextRender: (callback) => {
+      const handler = (_: any, payload: {
+        requestId: string
+        items: Array<{
+          id: string
+          label: string
+          shortcut?: string
+          type: 'normal' | 'separator'
+          enabled: boolean
+          danger: boolean
+        }>
+      }) => callback(payload)
+      ipcRenderer.on('menu:fileContext:render', handler)
+      return () => ipcRenderer.removeListener('menu:fileContext:render', handler)
+    },
+    sendFileContextAction: (requestId: string, actionId: string) => ipcRenderer.send('menu:fileContext:action', requestId, actionId),
+    notifyFileContextReady: () => ipcRenderer.send('menu:fileContext:ready')
   },
   config: {
     getPath: () => ipcRenderer.invoke('config:getPath'),

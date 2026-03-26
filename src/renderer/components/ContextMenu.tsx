@@ -1,4 +1,5 @@
-import { useEffect, useRef, useCallback } from 'react'
+import { useEffect, useRef, useLayoutEffect, useState } from 'react'
+import { createPortal } from 'react-dom'
 
 export interface ContextMenuItem {
   id: string
@@ -33,29 +34,54 @@ export const INITIAL_CONTEXT_MENU_STATE: ContextMenuState = {
 
 export function ContextMenu({ state, onClose }: ContextMenuProps) {
   const menuRef = useRef<HTMLDivElement>(null)
+  const [menuStyle, setMenuStyle] = useState<{ left: number; top: number; maxHeight: number; visibility: 'hidden' | 'visible' }>({
+    left: state.x,
+    top: state.y,
+    maxHeight: Math.max(120, window.innerHeight - 16),
+    visibility: 'hidden'
+  })
 
-  const adjustPosition = useCallback(() => {
-    if (!menuRef.current || !state.visible) return
-    const menu = menuRef.current
-    const rect = menu.getBoundingClientRect()
-    const vw = window.innerWidth
-    const vh = window.innerHeight
+  const visibleItems = state.items.filter(item => !item.hidden)
 
-    let x = state.x
-    let y = state.y
+  useLayoutEffect(() => {
+    if (!state.visible || !menuRef.current) return
 
-    if (x + rect.width > vw) x = vw - rect.width - 4
-    if (y + rect.height > vh) y = vh - rect.height - 4
-    if (x < 0) x = 4
-    if (y < 0) y = 4
+    const gap = 8
+    const minHeight = 120
 
-    menu.style.left = `${x}px`
-    menu.style.top = `${y}px`
-  }, [state.x, state.y, state.visible])
+    const updatePosition = () => {
+      if (!menuRef.current) return
+
+      const menu = menuRef.current
+      const viewportWidth = window.visualViewport?.width ?? window.innerWidth
+      const viewportHeight = window.visualViewport?.height ?? window.innerHeight
+
+      const maxHeight = Math.max(minHeight, Math.floor(viewportHeight - gap * 2))
+      menu.style.maxHeight = `${maxHeight}px`
+
+      const rect = menu.getBoundingClientRect()
+      const left = Math.min(Math.max(state.x, gap), Math.max(gap, viewportWidth - rect.width - gap))
+      const top = Math.min(Math.max(state.y, gap), Math.max(gap, viewportHeight - rect.height - gap))
+
+      setMenuStyle({ left, top, maxHeight, visibility: 'visible' })
+    }
+
+    setMenuStyle(prev => ({ ...prev, visibility: 'hidden' }))
+    updatePosition()
+
+    const handleResize = () => updatePosition()
+    window.addEventListener('resize', handleResize)
+    window.visualViewport?.addEventListener('resize', handleResize)
+
+    return () => {
+      window.removeEventListener('resize', handleResize)
+      window.visualViewport?.removeEventListener('resize', handleResize)
+    }
+  }, [state.visible, state.x, state.y, visibleItems.length])
 
   useEffect(() => {
     if (!state.visible) return
-    adjustPosition()
+
     const handleClick = (e: MouseEvent) => {
       if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
         onClose()
@@ -64,27 +90,28 @@ export function ContextMenu({ state, onClose }: ContextMenuProps) {
     const handleKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose()
     }
-    const handleScroll = () => onClose()
+
     document.addEventListener('mousedown', handleClick, true)
     document.addEventListener('keydown', handleKey, true)
-    window.addEventListener('scroll', handleScroll, true)
     return () => {
       document.removeEventListener('mousedown', handleClick, true)
       document.removeEventListener('keydown', handleKey, true)
-      window.removeEventListener('scroll', handleScroll, true)
     }
-  }, [state.visible, onClose, adjustPosition])
+  }, [state.visible, onClose])
 
   if (!state.visible) return null
-
-  const visibleItems = state.items.filter(item => !item.hidden)
   if (visibleItems.length === 0) return null
 
-  return (
+  const menuContent = (
     <div
       ref={menuRef}
       className="context-menu"
-      style={{ left: state.x, top: state.y }}
+      style={{
+        left: menuStyle.left,
+        top: menuStyle.top,
+        maxHeight: `${menuStyle.maxHeight}px`,
+        visibility: menuStyle.visibility
+      }}
     >
       {visibleItems.map((item, index) => {
         if (item.separator) {
@@ -108,6 +135,8 @@ export function ContextMenu({ state, onClose }: ContextMenuProps) {
       })}
     </div>
   )
+
+  return createPortal(menuContent, document.body)
 }
 
 export function buildTerminalMenuItems(opts: {

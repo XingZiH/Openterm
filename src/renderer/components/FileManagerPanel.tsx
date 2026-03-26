@@ -162,10 +162,11 @@ export const FileManagerPanel = forwardRef<FileManagerPanelHandle, FileManagerPa
     fetchDirectory(currentPath)
   }
 
-  const formatSize = (size: number) => {
-    if (size === 0) return '-'
+  const formatSize = (file: SFTPFile) => {
+    if (file.type === 'd') return '-'
+    if (file.size === 0) return '-'
     const units = ['B', 'KB', 'MB', 'GB']
-    let s = size
+    let s = file.size
     let i = 0
     while (s >= 1024 && i < units.length - 1) {
       s /= 1024
@@ -369,7 +370,7 @@ export const FileManagerPanel = forwardRef<FileManagerPanelHandle, FileManagerPa
                       <span className="fm-filename">{file.name}</span>
                     )}
                   </td>
-                  <td className="td-size">{formatSize(file.size)}</td>
+                  <td className="td-size">{formatSize(file)}</td>
                   <td className="td-perms">{file.permissions}</td>
                   <td className="td-time">{formatDate(file.modifyTime)}</td>
                 </tr>

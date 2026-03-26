@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, shell, safeStorage, dialog, clipboard } from 'electron'
+import { app, BrowserWindow, ipcMain, shell, safeStorage, dialog, clipboard, screen } from 'electron'
 import { join } from 'path'
 import { readFileSync, promises as fsPromises } from 'fs'
 import { exec } from 'child_process'
@@ -13,12 +13,119 @@ import { getConfigPath } from './config-file'
 import { MAX_EDIT_FILE_SIZE, localFileManager } from './local-file-manager'
 
 const isDev = process.env.NODE_ENV === 'development'
+const MAX_FILE_MENU_ITEMS = 40
+const MAX_FILE_MENU_LABEL_LENGTH = 80
+const FILE_MENU_WIDTH = 236
+const FILE_MENU_ITEM_HEIGHT = 30
+const FILE_MENU_SEPARATOR_HEIGHT = 8
+const FILE_MENU_PADDING = 6
+
+type FileContextMenuItem = {
+  id: string
+  label?: string
+  shortcut?: string
+  type?: 'normal' | 'separator'
+  enabled?: boolean
+  danger?: boolean
+}
+
+type FileContextMenuRenderPayload = {
+  requestId: string
+  items: Array<{
+    id: string
+    label: string
+    shortcut?: string
+    type: 'normal' | 'separator'
+    enabled: boolean
+    danger: boolean
+  }>
+}
+
+let fileContextMenuWindow: BrowserWindow | null = null
+let pendingFileContextMenuPayload: FileContextMenuRenderPayload | null = null
+let isFileContextMenuLoaded = false
 
 let mainWindow: BrowserWindow | null = null
 const sshManager = new SSHManager()
 const store = new Store()
 const aiService = new AiService()
 const localPtyManager = new LocalPtyManager()
+
+function estimateFileContextMenuHeight(items: FileContextMenuRenderPayload['items']): number {
+  const bodyHeight = items.reduce((height, item) => {
+    return height + (item.type === 'separator' ? FILE_MENU_SEPARATOR_HEIGHT : FILE_MENU_ITEM_HEIGHT)
+  }, 0)
+  return Math.max(80, bodyHeight + FILE_MENU_PADDING * 2)
+}
+
+function createFileContextMenuWindow(): BrowserWindow {
+  if (fileContextMenuWindow && !fileContextMenuWindow.isDestroyed()) {
+    return fileContextMenuWindow
+  }
+
+  fileContextMenuWindow = new BrowserWindow({
+    width: FILE_MENU_WIDTH,
+    height: 200,
+    show: false,
+    frame: false,
+    resizable: false,
+    movable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    skipTaskbar: true,
+    focusable: true,
+    transparent: true,
+    backgroundColor: '#00000000',
+    parent: mainWindow ?? undefined,
+    hasShadow: true,
+    webPreferences: {
+      preload: join(__dirname, '../preload/index.js'),
+      sandbox: false,
+      contextIsolation: true,
+      nodeIntegration: false
+    }
+  })
+
+  fileContextMenuWindow.on('closed', () => {
+    fileContextMenuWindow = null
+    isFileContextMenuLoaded = false
+    pendingFileContextMenuPayload = null
+  })
+
+  fileContextMenuWindow.on('blur', () => {
+    if (fileContextMenuWindow && !fileContextMenuWindow.isDestroyed()) {
+      fileContextMenuWindow.hide()
+    }
+  })
+
+  fileContextMenuWindow.webContents.setWindowOpenHandler((details) => {
+    shell.openExternal(details.url)
+    return { action: 'deny' }
+  })
+
+  if (process.env.ELECTRON_RENDERER_URL) {
+    fileContextMenuWindow.loadURL(`${process.env.ELECTRON_RENDERER_URL}/file-context-menu.html`)
+  } else {
+    fileContextMenuWindow.loadFile(join(__dirname, '../renderer/file-context-menu.html'))
+  }
+
+  fileContextMenuWindow.webContents.once('did-finish-load', () => {
+    isFileContextMenuLoaded = true
+    if (pendingFileContextMenuPayload && fileContextMenuWindow && !fileContextMenuWindow.isDestroyed()) {
+      fileContextMenuWindow.webContents.send('menu:fileContext:render', pendingFileContextMenuPayload)
+      pendingFileContextMenuPayload = null
+    }
+  })
+
+  return fileContextMenuWindow
+}
+
+function hideFileContextMenuWindow(): void {
+  if (fileContextMenuWindow && !fileContextMenuWindow.isDestroyed()) {
+    fileContextMenuWindow.hide()
+  }
+}
 
 function createWindow(): void {
   const isMac = process.platform === 'darwin'
@@ -75,6 +182,113 @@ ipcMain.on('window:setSize', (_e, width: number, height: number) => {
   if (!mainWindow || mainWindow.isMaximized()) return
   const [, currentH] = mainWindow.getSize()
   mainWindow.setSize(Math.max(900, width), Math.max(600, height || currentH), true)
+})
+
+// --- IPC: File Context Menu Window ---
+ipcMain.handle('menu:fileContext:open', async (event, payload: {
+  requestId: string
+  x: number
+  y: number
+  items: FileContextMenuItem[]
+}) => {
+  try {
+    if (!mainWindow || mainWindow.isDestroyed()) {
+      return { success: false, error: 'No window' }
+    }
+
+    const requestId = typeof payload?.requestId === 'string' ? payload.requestId : ''
+    if (!requestId) {
+      return { success: false, error: 'Invalid requestId' }
+    }
+
+    const sourceItems = Array.isArray(payload?.items) ? payload.items.slice(0, MAX_FILE_MENU_ITEMS) : []
+    const items = sourceItems.map((item, index) => {
+      if (item?.type === 'separator') {
+        return {
+          id: `separator-${index}`,
+          label: '',
+          shortcut: '',
+          type: 'separator' as const,
+          enabled: false,
+          danger: false
+        }
+      }
+
+      const actionId = typeof item?.id === 'string' && item.id.trim() ? item.id.trim() : `item-${index}`
+      const label = typeof item?.label === 'string' ? item.label.slice(0, MAX_FILE_MENU_LABEL_LENGTH) : ''
+      const shortcut = typeof item?.shortcut === 'string' ? item.shortcut.slice(0, 24) : ''
+      return {
+        id: actionId,
+        label,
+        shortcut,
+        type: 'normal' as const,
+        enabled: item?.enabled !== false,
+        danger: item?.danger === true
+      }
+    })
+
+    if (items.length === 0) {
+      return { success: false, error: 'No valid menu items' }
+    }
+
+    const windowRef = createFileContextMenuWindow()
+
+    const cursorPoint = screen.getCursorScreenPoint()
+    const ownerWindow = BrowserWindow.fromWebContents(event.sender)
+    const contentBounds = ownerWindow?.getContentBounds()
+    const clickX = Number.isFinite(payload?.x) ? Math.floor(payload.x) : 0
+    const clickY = Number.isFinite(payload?.y) ? Math.floor(payload.y) : 0
+
+    const requestedX = contentBounds ? contentBounds.x + clickX : cursorPoint.x
+    const requestedY = contentBounds ? contentBounds.y + clickY : cursorPoint.y
+
+    const height = estimateFileContextMenuHeight(items)
+    const display = screen.getDisplayNearestPoint({ x: requestedX, y: requestedY })
+    const workArea = display.workArea
+
+    const boundedX = Math.min(
+      Math.max(requestedX, workArea.x),
+      Math.max(workArea.x, workArea.x + workArea.width - FILE_MENU_WIDTH)
+    )
+    const boundedY = Math.min(
+      Math.max(requestedY, workArea.y),
+      Math.max(workArea.y, workArea.y + workArea.height - height)
+    )
+
+    const renderPayload: FileContextMenuRenderPayload = { requestId, items }
+    if (isFileContextMenuLoaded && !windowRef.webContents.isLoading()) {
+      windowRef.webContents.send('menu:fileContext:render', renderPayload)
+    } else {
+      pendingFileContextMenuPayload = renderPayload
+    }
+
+    windowRef.setBounds({ x: boundedX, y: boundedY, width: FILE_MENU_WIDTH, height }, false)
+    windowRef.showInactive()
+    windowRef.focus()
+
+    return { success: true }
+  } catch (err: any) {
+    return { success: false, error: err.message }
+  }
+})
+
+ipcMain.on('menu:fileContext:hide', () => {
+  hideFileContextMenuWindow()
+})
+
+ipcMain.on('menu:fileContext:action', (_event, requestId: string, actionId: string) => {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  if (!requestId || !actionId) return
+  mainWindow.webContents.send('menu:fileContext:action', requestId, actionId)
+  hideFileContextMenuWindow()
+})
+
+ipcMain.on('menu:fileContext:ready', () => {
+  isFileContextMenuLoaded = true
+  if (pendingFileContextMenuPayload && fileContextMenuWindow && !fileContextMenuWindow.isDestroyed()) {
+    fileContextMenuWindow.webContents.send('menu:fileContext:render', pendingFileContextMenuPayload)
+    pendingFileContextMenuPayload = null
+  }
 })
 
 // --- IPC: Store ---
@@ -563,6 +777,7 @@ app.whenReady().then(() => {
 
   // Kill PTYs before window closes to prevent 'Object has been destroyed' errors
   mainWindow?.on('close', () => {
+    hideFileContextMenuWindow()
     localPtyManager.killAll()
     sshManager.disconnectAll()
   })
@@ -575,6 +790,7 @@ app.whenReady().then(() => {
 })
 
 app.on('window-all-closed', () => {
+  hideFileContextMenuWindow()
   sshManager.disconnectAll()
   localPtyManager.killAll()
   if (process.platform !== 'darwin') {

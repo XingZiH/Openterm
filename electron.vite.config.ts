@@ -32,7 +32,8 @@ export default defineConfig({
       outDir: resolve(__dirname, 'out/renderer'),
       rollupOptions: {
         input: {
-          index: resolve(__dirname, 'src/renderer/index.html')
+          index: resolve(__dirname, 'src/renderer/index.html'),
+          'file-context-menu': resolve(__dirname, 'src/renderer/file-context-menu.html')
         }
       }
     }

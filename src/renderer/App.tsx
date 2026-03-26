@@ -1054,6 +1054,7 @@ export default function App() {
   }>({ visible: false, title: '', onConfirm: () => {} })
   const [promptValue, setPromptValue] = useState('')
   const promptInputRef = useRef<HTMLInputElement>(null)
+  const fileMenuActionStateRef = useRef<{ requestId: string; actions: Record<string, () => void> }>({ requestId: '', actions: {} })
   // File editor state
   const [editingFile, setEditingFile] = useState<{ sessionId: string; filePath: string; fileName: string } | null>(null)
   const fileManagerPanelRef = useRef<FileManagerPanelHandle | null>(null)
@@ -1374,6 +1375,17 @@ export default function App() {
 
   const closeContextMenu = useCallback(() => {
     setContextMenu(INITIAL_CONTEXT_MENU_STATE)
+  }, [])
+
+  useEffect(() => {
+    const off = window.electronAPI.nativeMenu.onFileMenuAction((requestId, actionId) => {
+      if (fileMenuActionStateRef.current.requestId !== requestId) return
+      const action = fileMenuActionStateRef.current.actions[actionId]
+      if (!action) return
+      action()
+      fileMenuActionStateRef.current = { requestId: '', actions: {} }
+    })
+    return () => off()
   }, [])
 
   // --- Terminal context menu handler ---
@@ -1817,7 +1829,34 @@ export default function App() {
       }
     })
 
-    setContextMenu({ visible: true, x: event.clientX, y: event.clientY, items })
+    const menuItems = items.filter(item => !item.hidden)
+    const actionMap: Record<string, () => void> = {}
+
+    const nativeItems = menuItems.map((item, index) => {
+      if (item.separator) {
+        return { id: `sep-${index}`, type: 'separator' as const }
+      }
+      if (item.onClick) {
+        actionMap[item.id] = item.onClick
+      }
+      return {
+        id: item.id,
+        label: item.label,
+        shortcut: item.shortcut,
+        type: 'normal' as const,
+        enabled: !item.disabled,
+        danger: item.danger === true
+      }
+    })
+
+    const clickX = Number.isFinite(event.clientX) ? event.clientX : event.nativeEvent.clientX
+    const clickY = Number.isFinite(event.clientY) ? event.clientY : event.nativeEvent.clientY
+    const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+    fileMenuActionStateRef.current = { requestId, actions: actionMap }
+    window.electronAPI.nativeMenu.openFileContextMenu({ requestId, x: clickX, y: clickY, items: nativeItems }).catch((err: any) => {
+      fileMenuActionStateRef.current = { requestId: '', actions: {} }
+      showToast(`打开文件菜单失败: ${err.message}`, 'error')
+    })
   }, [activeSessionId, fileClipboard, platform, settings, fileOps])
 
   // Create terminal for a session — creates a persistent container div
