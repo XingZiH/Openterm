@@ -135,7 +135,14 @@ export const FileManagerPanel = forwardRef<FileManagerPanelHandle, FileManagerPa
     if (items.length === 0) return
 
     for (const file of items) {
-      const localPath = file.path
+      let localPath = file.path
+      if (!localPath) {
+        localPath = window.electronAPI.file.getPathForFile(file)
+      }
+      if (!localPath) {
+        onToast(`上传失败: 无法读取本地路径 (${file.name})`, 'error')
+        continue
+      }
       const remotePath = currentPath.endsWith('/') ? `${currentPath}${file.name}` : `${currentPath}/${file.name}`
 
       onToast(`开始上传 ${file.name}...`, 'info')

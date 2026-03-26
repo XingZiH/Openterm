@@ -250,6 +250,7 @@ declare global {
       }
       file: {
         readAsDataUrl: (filePath: string) => Promise<string | null>
+        getPathForFile: (file: File) => string | undefined
         readForAi: (sessionId: string, path: string, type: 'file' | 'dir') => Promise<{ success: boolean; output?: string; error?: string }>
       }
       ssh: {

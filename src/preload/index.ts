@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { SFTPFile } from '../shared/sftp-file'
 
 export interface ElectronAPI {
@@ -59,6 +59,7 @@ export interface ElectronAPI {
   }
   file: {
     readAsDataUrl: (filePath: string) => Promise<string | null>
+    getPathForFile: (file: File) => string | undefined
     readForAi: (sessionId: string, path: string, type: 'file' | 'dir') => Promise<{ success: boolean; output?: string; error?: string }>
   }
   chatHistory: {
@@ -176,6 +177,7 @@ const api: ElectronAPI = {
   },
   file: {
     readAsDataUrl: (filePath) => ipcRenderer.invoke('file:readAsDataUrl', filePath),
+    getPathForFile: (file) => webUtils.getPathForFile(file),
     readForAi: (sessionId, path, type) => ipcRenderer.invoke('file:readForAi', sessionId, path, type)
   },
   chatHistory: {
