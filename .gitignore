@@ -5,3 +5,4 @@ dist/
 *.log
 .env
 .ace-tool/
+/.claude/worktrees/*
