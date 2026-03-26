@@ -1,3 +1,5 @@
+import type { SFTPFile } from '../../shared/sftp-file'
+
 export interface ConnectionConfig {
   id: string
   name: string
@@ -220,14 +222,7 @@ export function extractCommands(text: string): string[] {
   return commands
 }
 
-export interface SFTPFile {
-  name: string
-  type: 'd' | '-' | 'l'    // directory, file, symlink
-  size: number             // bytes
-  modifyTime: number       // timestamp in seconds or ms
-  accessTime: number
-  permissions: string      // e.g. 'drwxr-xr-x' or numeric '0755'
-}
+export type { SFTPFile }
 
 declare global {
   interface Window {

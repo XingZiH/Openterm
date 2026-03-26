@@ -1,12 +1,17 @@
 import fs from 'fs/promises'
 import path from 'path'
 import os from 'os'
+import { SFTPFile, createParentDirectoryEntry, sortSftpFiles } from '../shared/sftp-file'
+
+// 并发 stat 上限，防止打开过多文件描述符
+const STAT_CONCURRENCY = 64
+export const MAX_EDIT_FILE_SIZE = 5 * 1024 * 1024 // 5MB 编辑上限
+const BINARY_DETECT_BYTES = 8 * 1024 // 8KB 二进制探测窗口
 
 export class LocalFileManager {
-  async ls(targetPath: string): Promise<any[]> {
-    // resolve path if empty (use os.homedir())
+  async ls(targetPath: string): Promise<SFTPFile[]> {
     const actualPath = targetPath === '.' || !targetPath ? os.homedir() : targetPath
-    
+
     let list
     try {
       list = await fs.readdir(actualPath, { withFileTypes: true })
@@ -16,66 +21,47 @@ export class LocalFileManager {
       }
       throw err
     }
-    
-    // gather stats
-    const files = await Promise.all(list.map(async (dirent) => {
-      const fullPath = path.join(actualPath, dirent.name)
-      try {
-        const stat = await fs.stat(fullPath)
-        const isDir = dirent.isDirectory()
-        const isSymlink = dirent.isSymbolicLink()
-        const type = isDir ? 'd' : isSymlink ? 'l' : '-'
-        
-        const permissions = this.modeToPermissions(stat.mode, isDir, isSymlink)
 
-        return {
-          name: dirent.name,
-          type,
-          size: stat.size,
-          modifyTime: Math.floor(stat.mtimeMs / 1000),
-          accessTime: Math.floor(stat.atimeMs / 1000),
-          permissions
+    const results: SFTPFile[] = []
+    for (let i = 0; i < list.length; i += STAT_CONCURRENCY) {
+      const batch = list.slice(i, i + STAT_CONCURRENCY)
+      const batchResults = await Promise.all(batch.map(async (dirent): Promise<SFTPFile | null> => {
+        const fullPath = path.join(actualPath, dirent.name)
+        try {
+          const stat = await fs.stat(fullPath)
+          const isDir = dirent.isDirectory()
+          const isSymlink = dirent.isSymbolicLink()
+          return {
+            name: dirent.name,
+            type: isDir ? 'd' : isSymlink ? 'l' : '-',
+            size: stat.size,
+            modifyTime: Math.floor(stat.mtimeMs / 1000),
+            accessTime: Math.floor(stat.atimeMs / 1000),
+            permissions: this.modeToPermissions(stat.mode, isDir, isSymlink)
+          }
+        } catch {
+          return null
         }
-      } catch (e) {
-        // e.g. permission denied for stat
-        return null
+      }))
+      for (const result of batchResults) {
+        if (result) results.push(result)
       }
-    }))
-
-    const validFiles = files.filter(Boolean) as any[]
-    
-    // Sort: directories first, then alphabetical
-    validFiles.sort((a, b) => {
-      if (a.name === '..') return -1
-      if (b.name === '..') return 1
-      if (a.type === 'd' && b.type !== 'd') return -1
-      if (a.type !== 'd' && b.type === 'd') return 1
-      return a.name.localeCompare(b.name)
-    })
-    
-    // Add '..' if not root
-    const parentPath = path.dirname(actualPath)
-    if (parentPath !== actualPath) {
-       validFiles.unshift({
-         name: '..',
-         type: 'd',
-         size: 0,
-         modifyTime: 0,
-         accessTime: 0,
-         permissions: 'drwxr-xr-x'
-       })
     }
 
-    return validFiles
+    const files = sortSftpFiles(results)
+    const parentPath = path.dirname(actualPath)
+    if (parentPath !== actualPath) {
+      files.unshift(createParentDirectoryEntry())
+    }
+
+    return files
   }
 
   async download(remotePath: string, localPath: string): Promise<void> {
-    // upload/download for local terminal is just local file copy
     await fs.copyFile(remotePath, localPath)
   }
 
   async upload(localPath: string, remotePath: string): Promise<void> {
-    // upload/download for local terminal is just local file copy
     await fs.copyFile(localPath, remotePath)
   }
 
@@ -84,7 +70,42 @@ export class LocalFileManager {
   }
 
   async copy(srcPath: string, destPath: string): Promise<void> {
+    const stat = await fs.stat(srcPath)
+    if (stat.isDirectory()) {
+      await fs.cp(srcPath, destPath, { recursive: true })
+      return
+    }
     await fs.copyFile(srcPath, destPath)
+  }
+
+  async readFile(filePath: string): Promise<{ content: string; size: number }> {
+    const stat = await fs.stat(filePath)
+    if (stat.size > MAX_EDIT_FILE_SIZE) {
+      throw new Error(`文件过大 (${(stat.size / 1024 / 1024).toFixed(1)}MB)，编辑上限为 5MB`)
+    }
+
+    if (stat.size > 0) {
+      const fileHandle = await fs.open(filePath, 'r')
+      try {
+        const probeSize = Math.min(stat.size, BINARY_DETECT_BYTES)
+        const probeBuffer = Buffer.alloc(probeSize)
+        const { bytesRead } = await fileHandle.read(probeBuffer, 0, probeSize, 0)
+        for (let i = 0; i < bytesRead; i++) {
+          if (probeBuffer[i] === 0) {
+            throw new Error('这是一个二进制文件，不支持编辑')
+          }
+        }
+      } finally {
+        await fileHandle.close()
+      }
+    }
+
+    const content = await fs.readFile(filePath, 'utf-8')
+    return { content, size: stat.size }
+  }
+
+  async writeFile(filePath: string, content: string): Promise<void> {
+    await fs.writeFile(filePath, content, 'utf-8')
   }
 
   private modeToPermissions(mode: number, isDir: boolean, isSymlink: boolean): string {

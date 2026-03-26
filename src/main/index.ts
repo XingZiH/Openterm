@@ -5,12 +5,12 @@ import { exec } from 'child_process'
 import { promisify } from 'util'
 
 const execAsync = promisify(exec)
-import { SSHManager } from './ssh-manager'
+import { SSHManager, shellEscape } from './ssh-manager'
 import { Store } from './store'
 import { AiService } from './ai-service'
 import { LocalPtyManager } from './local-pty'
 import { getConfigPath } from './config-file'
-import { localFileManager } from './local-file-manager'
+import { MAX_EDIT_FILE_SIZE, localFileManager } from './local-file-manager'
 
 const isDev = process.env.NODE_ENV === 'development'
 
@@ -387,12 +387,6 @@ localPtyManager.on('exit', (id: string, exitCode: number) => {
 ipcMain.handle('clipboard:readText', () => clipboard.readText())
 ipcMain.handle('clipboard:writeText', (_e, text: string) => clipboard.writeText(text))
 
-// Shell-escape a string for use inside double quotes (防注入)
-function shellEscape(s: string): string {
-  // 先过滤换行符/回车符防止命令注入，再转义 shell 元字符
-  return s.replace(/[\r\n]/g, '').replace(/[\\"$`!]/g, '\\$&')
-}
-
 // --- IPC: SFTP Delete ---
 ipcMain.handle('sftp:delete', async (_e, sessionId: string, targetPath: string) => {
   try {
@@ -427,11 +421,16 @@ ipcMain.handle('sftp:rename', async (_e, sessionId: string, oldPath: string, new
 })
 
 // Validate that a filename (last segment) is safe — no path traversal or illegal chars
+// 注意：此函数只验证最后一段名称，允许传入完整路径
 function validateFileName(filePath: string): void {
-  const name = filePath.split('/').pop() || ''
-  if (!name || name === '.' || name === '..' || name.includes('/') || name.includes('\\') || name.includes('\0')) {
+  // 提取最后一段（文件名或目录名）
+  const parts = filePath.replace(/\\/g, '/').split('/')
+  const name = parts[parts.length - 1] || ''
+  // 检查名称是否合法
+  if (!name || name === '.' || name === '..' || name.includes('\0')) {
     throw new Error(`非法文件名: "${name}"`)
   }
+  // name 已经是 split 后的最后一段，不会包含 /
 }
 
 // --- IPC: SFTP Create File ---
@@ -473,53 +472,51 @@ ipcMain.handle('sftp:mkdir', async (_e, sessionId: string, dirPath: string) => {
   }
 })
 
-const MAX_EDIT_FILE_SIZE = 5 * 1024 * 1024 // 5MB 编辑上限
+type RemoteReadFileMetadata = {
+  status: 'ok' | 'too_large' | 'binary'
+  size: number
+}
 
 // --- IPC: SFTP Read File (for editor) ---
 ipcMain.handle('sftp:readFile', async (_e, sessionId: string, filePath: string) => {
   try {
     if (sessionId.startsWith('local-')) {
-      const stat = await fsPromises.stat(filePath)
-      if (stat.size > MAX_EDIT_FILE_SIZE) {
-        return { success: false, error: `文件过大 (${(stat.size / 1024 / 1024).toFixed(1)}MB)，编辑上限为 5MB` }
-      }
-      // 先以 Buffer 读取检测二进制（检查前 8KB 是否含 \0）
-      if (stat.size > 0) {
-        const fd = await fsPromises.open(filePath, 'r')
-        const probe = Buffer.alloc(Math.min(stat.size, 8192))
-        await fd.read(probe, 0, probe.length, 0)
-        await fd.close()
-        if (probe.includes(0)) {
-          return { success: false, error: '这是一个二进制文件，不支持编辑' }
-        }
-      }
-      const content = await fsPromises.readFile(filePath, 'utf-8')
-      return { success: true, content, size: stat.size }
+      const result = await localFileManager.readFile(filePath)
+      return { success: true, ...result }
     }
-    // 远程: 合并 stat + file + cat 为单条命令，减少 SSH 往返延迟
+
     const escaped = shellEscape(filePath)
-    const combined = await sshManager.exec(sessionId,
-      `SIZE=$(stat -c%s "${escaped}" 2>/dev/null || wc -c < "${escaped}"); ` +
-      `echo "---SIZE:$SIZE---"; ` +
-      `if [ "$SIZE" -gt ${MAX_EDIT_FILE_SIZE} ]; then echo "---TOO_LARGE---"; exit 0; fi; ` +
+    const combined = await sshManager.exec(
+      sessionId,
+      // 兼容 GNU (Linux) 和 BSD (macOS) 的 stat 命令
+      `SIZE=$(stat -c%s "${escaped}" 2>/dev/null || stat -f%z "${escaped}" 2>/dev/null || wc -c < "${escaped}"); ` +
+      `if [ "$SIZE" -gt ${MAX_EDIT_FILE_SIZE} ]; then printf '%s\n' '{"status":"too_large","size":'"$SIZE"'}'; exit 0; fi; ` +
       `if [ "$SIZE" -gt 0 ]; then ` +
         `FTYPE=$(file -b --mime-encoding "${escaped}" 2>/dev/null || echo "unknown"); ` +
-        `if [ "$FTYPE" = "binary" ]; then echo "---BINARY---"; exit 0; fi; ` +
+        `if [ "$FTYPE" = "binary" ]; then printf '%s\n' '{"status":"binary","size":'"$SIZE"'}'; exit 0; fi; ` +
       `fi; ` +
-      `echo "---CONTENT_START---"; cat "${escaped}"`
+      `printf '%s\n' '{"status":"ok","size":'"$SIZE"'}'; ` +
+      `base64 < "${escaped}" | tr -d '\n'`
     )
-    // 解析合并输出
-    const sizeMatch = combined.match(/---SIZE:(\d+)---/)
-    const size = sizeMatch ? parseInt(sizeMatch[1], 10) : 0
-    if (combined.includes('---TOO_LARGE---')) {
-      return { success: false, error: `文件过大 (${(size / 1024 / 1024).toFixed(1)}MB)，编辑上限为 5MB` }
+
+    const headerEnd = combined.indexOf('\n')
+    const metadataLine = headerEnd >= 0 ? combined.slice(0, headerEnd) : combined
+    const encodedContent = headerEnd >= 0 ? combined.slice(headerEnd + 1) : ''
+
+    if (!metadataLine) {
+      throw new Error('远程读取返回为空')
     }
-    if (combined.includes('---BINARY---')) {
+
+    const metadata = JSON.parse(metadataLine) as RemoteReadFileMetadata
+    if (metadata.status === 'too_large') {
+      return { success: false, error: `文件过大 (${(metadata.size / 1024 / 1024).toFixed(1)}MB)，编辑上限为 5MB` }
+    }
+    if (metadata.status === 'binary') {
       return { success: false, error: '这是一个二进制文件，不支持编辑' }
     }
-    const contentStart = combined.indexOf('---CONTENT_START---\n')
-    const content = contentStart >= 0 ? combined.substring(contentStart + '---CONTENT_START---\n'.length) : ''
-    return { success: true, content, size }
+
+    const content = encodedContent ? Buffer.from(encodedContent, 'base64').toString('utf-8') : ''
+    return { success: true, content, size: metadata.size }
   } catch (err: any) {
     return { success: false, error: err.message }
   }
@@ -529,7 +526,7 @@ ipcMain.handle('sftp:readFile', async (_e, sessionId: string, filePath: string) 
 ipcMain.handle('sftp:writeFile', async (_e, sessionId: string, filePath: string, content: string) => {
   try {
     if (sessionId.startsWith('local-')) {
-      await fsPromises.writeFile(filePath, content, 'utf-8')
+      await localFileManager.writeFile(filePath, content)
       return { success: true }
     }
     // 远程: 分块 base64 传输，避免命令行长度限制
@@ -541,17 +538,22 @@ ipcMain.handle('sftp:writeFile', async (_e, sessionId: string, filePath: string,
     }
     const b64 = Buffer.from(content, 'utf-8').toString('base64')
     const CHUNK_SIZE = 65536 // 64KB per chunk (safe for most shells)
+    // 使用唯一的临时文件名，避免多会话冲突
+    // 过滤 sessionId 中的危险字符，只保留字母数字和连字符
+    const safeSessionId = sessionId.replace(/[^a-zA-Z0-9-]/g, '_')
+    const tmpFile = `/tmp/.openterm_edit_${safeSessionId}_${Date.now()}`
     // 第一块用 > 覆盖，后续块用 >> 追加
     for (let i = 0; i < b64.length; i += CHUNK_SIZE) {
       const chunk = b64.substring(i, i + CHUNK_SIZE)
       const op = i === 0 ? '>' : '>>'
-      await sshManager.exec(sessionId, `printf '%s' '${chunk}' ${op} /tmp/.openterm_edit_tmp`)
+      await sshManager.exec(sessionId, `printf '%s' '${chunk}' ${op} "${tmpFile}"`)
     }
-    await sshManager.exec(sessionId, `base64 -d /tmp/.openterm_edit_tmp > "${escapedPath}" && rm -f /tmp/.openterm_edit_tmp`)
+    await sshManager.exec(sessionId, `base64 -d "${tmpFile}" > "${escapedPath}" && rm -f "${tmpFile}"`)
     return { success: true }
   } catch (err: any) {
-    // 清理临时文件
-    try { await sshManager.exec(sessionId, 'rm -f /tmp/.openterm_edit_tmp') } catch {}
+    // 清理临时文件（使用与写入时相同的命名规则）
+    const safeSessionId = sessionId.replace(/[^a-zA-Z0-9-]/g, '_')
+    try { await sshManager.exec(sessionId, `rm -f /tmp/.openterm_edit_${safeSessionId}_*`) } catch {}
     return { success: false, error: err.message }
   }
 })

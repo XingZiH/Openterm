@@ -1,6 +1,19 @@
 import { EventEmitter } from 'events'
 import { Client, type ConnectConfig, type ClientChannel } from 'ssh2'
 import { v4 as uuidv4 } from 'uuid'
+import { SFTPFile, sortSftpFiles } from '../shared/sftp-file'
+
+// Shell-escape a string for use inside double quotes (防注入)
+export function shellEscape(s: string): string {
+  // 先过滤换行符/回车符防止命令注入，再转义 shell 元字符
+  // 注意：$() 和 `` 命令替换需要特殊处理
+  return s
+    .replace(/[\r\n]/g, '')
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\$/g, '\\$')
+    .replace(/`/g, '\\`')
+}
 
 export interface SSHConnectionConfig {
   id: string
@@ -176,13 +189,12 @@ export class SSHManager extends EventEmitter {
     })
   }
 
-  async sftpLs(sessionId: string, path: string): Promise<any[]> {
+  async sftpLs(sessionId: string, path: string): Promise<SFTPFile[]> {
     const sftp = await this.getSftp(sessionId)
     return new Promise((resolve, reject) => {
       sftp.readdir(path, (err: Error | undefined, list: any[]) => {
         if (err) return reject(err)
-        // Transform the raw sftp attributes into our SFTPFile interface
-        const files = list.map(item => ({
+        const files: SFTPFile[] = list.map(item => ({
           name: item.filename,
           type: item.longname.startsWith('d') ? 'd' : item.longname.startsWith('l') ? 'l' : '-',
           size: item.attrs.size,
@@ -190,15 +202,7 @@ export class SSHManager extends EventEmitter {
           accessTime: item.attrs.atime,
           permissions: item.longname.split(' ')[0]
         }))
-        // Sort: directories first, then alphabetical
-        files.sort((a, b) => {
-          if (a.name === '..') return -1
-          if (b.name === '..') return 1
-          if (a.type === 'd' && b.type !== 'd') return -1
-          if (a.type !== 'd' && b.type === 'd') return 1
-          return a.name.localeCompare(b.name)
-        })
-        resolve(files)
+        resolve(sortSftpFiles(files))
       })
     })
   }
@@ -235,12 +239,42 @@ export class SSHManager extends EventEmitter {
 
   async sftpCopy(sessionId: string, srcPath: string, destPath: string): Promise<void> {
     const sftp = await this.getSftp(sessionId)
+
+    // 使用 lstat 检查源本身（不跟随符号链接）
+    const srcStat = await new Promise<any>((resolve, reject) => {
+      sftp.lstat(srcPath, (err: Error | null, stats: any) => {
+        if (err) reject(err)
+        else resolve(stats)
+      })
+    })
+
+    // 处理符号链接
+    if (srcStat.isSymbolicLink()) {
+      // 使用 cp -P 保持符号链接本身（不跟随）
+      await this.exec(sessionId, `cp -P "${shellEscape(srcPath)}" "${shellEscape(destPath)}"`)
+      return
+    }
+
+    if (srcStat.isDirectory()) {
+      // 目录复制：使用 cp -r 命令递归复制（不跟随符号链接）
+      await this.exec(sessionId, `cp -rP "${shellEscape(srcPath)}" "${shellEscape(destPath)}"`)
+      return
+    }
+
+    // 文件复制：使用流
     return new Promise((resolve, reject) => {
       const readStream = sftp.createReadStream(srcPath)
       const writeStream = sftp.createWriteStream(destPath)
 
-      readStream.on('error', (err: Error) => reject(err))
-      writeStream.on('error', (err: Error) => reject(err))
+      // 清理函数：销毁两个流
+      const cleanup = (err?: Error) => {
+        readStream.destroy()
+        writeStream.destroy()
+        if (err) reject(err)
+      }
+
+      readStream.on('error', cleanup)
+      writeStream.on('error', cleanup)
       writeStream.on('close', () => resolve())
 
       readStream.pipe(writeStream)

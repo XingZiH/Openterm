@@ -1,5 +1,9 @@
-import React, { useState, useEffect, useRef } from 'react'
+import React, { useState, useEffect, useRef, forwardRef, useImperativeHandle } from 'react'
 import { SFTPFile } from '../types'
+
+export interface FileManagerPanelHandle {
+  startRename: (fileName: string) => void
+}
 
 interface FileManagerPanelProps {
   sessionId: string
@@ -13,7 +17,7 @@ interface FileManagerPanelProps {
   onEditFile?: (filePath: string, fileName: string) => void
 }
 
-export function FileManagerPanel({ sessionId, settings, onClose, onToast, reloadToken = 0, onStateChange, onContextMenuRequest, cutFilePath, onEditFile }: FileManagerPanelProps) {
+export const FileManagerPanel = forwardRef<FileManagerPanelHandle, FileManagerPanelProps>(function FileManagerPanelInner({ sessionId, settings, onClose, onToast, reloadToken = 0, onStateChange, onContextMenuRequest, cutFilePath, onEditFile }, ref) {
   const [currentPath, setCurrentPath] = useState<string>('/')
   const [files, setFiles] = useState<SFTPFile[]>([])
   const [loading, setLoading] = useState<boolean>(false)
@@ -77,11 +81,16 @@ export function FileManagerPanel({ sessionId, settings, onClose, onToast, reload
         // 回退：下载文件
         let localPath = ''
         if (settings?.defaultDownloadPath) {
-          localPath = `${settings.defaultDownloadPath}\\${file.name}`
+          // 使用正确的路径分隔符：本地路径使用平台分隔符
+          const sep = settings.defaultDownloadPath.includes('\\') ? '\\' : '/'
+          localPath = `${settings.defaultDownloadPath}${sep}${file.name}`
         } else {
           const res = await window.electronAPI.dialog.selectDirectory()
           if (res.canceled || !res.filePaths.length) return
-          localPath = `${res.filePaths[0]}\\${file.name}`
+          // selectDirectory 返回的路径使用平台原生分隔符
+          const basePath = res.filePaths[0]
+          const sep = basePath.includes('\\') ? '\\' : '/'
+          localPath = `${basePath}${sep}${file.name}`
         }
 
         onToast(`开始下载 ${file.name}...`, 'info')
@@ -171,11 +180,11 @@ export function FileManagerPanel({ sessionId, settings, onClose, onToast, reload
     return '📄'
   }
 
-  const startRename = (fileName: string) => {
+  const startRename = React.useCallback((fileName: string) => {
     setRenamingFile(fileName)
     setRenameValue(fileName)
     setTimeout(() => renameInputRef.current?.select(), 0)
-  }
+  }, [])
 
   const submitRename = async () => {
     if (!renamingFile || !renameValue.trim() || renameValue === renamingFile) {
@@ -198,10 +207,9 @@ export function FileManagerPanel({ sessionId, settings, onClose, onToast, reload
     setRenamingFile(null)
   }
 
-  // Expose methods for parent component
-  const getCurrentPath = () => currentPath
-  const refresh = () => fetchDirectory(currentPath)
-  ;(window as any).__fileManagerPanel = { startRename, getCurrentPath, refresh }
+  useImperativeHandle(ref, () => ({
+    startRename
+  }), [startRename])
 
   const pathParts = currentPath.split('/').filter(Boolean)
 
@@ -379,4 +387,4 @@ export function FileManagerPanel({ sessionId, settings, onClose, onToast, reload
       </div>
     </div>
   )
-}
+})

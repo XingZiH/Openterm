@@ -24,7 +24,7 @@ import { AgentResultPanel } from './components/AgentResultPanel'
 import { WorkflowPanel } from './components/WorkflowPanel'
 import { SkillEditorModal } from './components/SkillEditorModal'
 import { SkillManagerModal } from './components/SkillManagerModal'
-import { FileManagerPanel } from './components/FileManagerPanel'
+import { FileManagerPanel, FileManagerPanelHandle } from './components/FileManagerPanel'
 import { FileEditorPanel } from './components/FileEditorPanel'
 import { ContextMenu, ContextMenuState, INITIAL_CONTEXT_MENU_STATE, buildTerminalMenuItems, buildFileMenuItems } from './components/ContextMenu'
 import { playStepComplete, playStepError, playWorkflowDone, playWorkflowStart } from './utils/workflow-sounds'
@@ -1056,6 +1056,7 @@ export default function App() {
   const promptInputRef = useRef<HTMLInputElement>(null)
   // File editor state
   const [editingFile, setEditingFile] = useState<{ sessionId: string; filePath: string; fileName: string } | null>(null)
+  const fileManagerPanelRef = useRef<FileManagerPanelHandle | null>(null)
   // File clipboard state for copy/cut operations
   const [fileClipboard, setFileClipboard] = useState<{ path: string; mode: 'copy' | 'cut'; sessionId: string } | null>(null)
   const [fmSelectedFile, setFmSelectedFile] = useState<SFTPFile | null>(null)
@@ -1509,6 +1510,10 @@ export default function App() {
       },
       pasteFile: async (targetDir: string) => {
         if (!fileClipboard || !activeSessionId) return
+        if (fileClipboard.sessionId !== activeSessionId) {
+          showToast('暂不支持跨会话粘贴，请在原会话中粘贴', 'error')
+          return
+        }
         const srcPath = fileClipboard.path
         const fileName = srcPath.split('/').pop() || ''
         const destPath = targetDir.endsWith('/') ? `${targetDir}${fileName}` : `${targetDir}/${fileName}`
@@ -1543,7 +1548,7 @@ export default function App() {
       },
       renameFile: () => {
         if (!fmSelectedFile) return
-        ;(window as any).__fileManagerPanel?.startRename(fmSelectedFile.name)
+        fileManagerPanelRef.current?.startRename(fmSelectedFile.name)
       },
       deleteFile: async () => {
         if (!fmSelectedFile || !activeSessionId) return
@@ -1568,11 +1573,16 @@ export default function App() {
         const filePath = getSelectedFilePath()
         let localPath = ''
         if (settings?.defaultDownloadPath) {
-          localPath = `${settings.defaultDownloadPath}\\${fmSelectedFile.name}`
+          // 使用正确的路径分隔符：本地路径使用平台分隔符
+          const sep = settings.defaultDownloadPath.includes('\\') ? '\\' : '/'
+          localPath = `${settings.defaultDownloadPath}${sep}${fmSelectedFile.name}`
         } else {
           const res = await window.electronAPI.dialog.selectDirectory()
           if (res.canceled || !res.filePaths.length) return
-          localPath = `${res.filePaths[0]}\\${fmSelectedFile.name}`
+          // selectDirectory 返回的路径使用平台原生分隔符
+          const basePath = res.filePaths[0]
+          const sep = basePath.includes('\\') ? '\\' : '/'
+          localPath = `${basePath}${sep}${fmSelectedFile.name}`
         }
         try {
           const downloadRes = await window.electronAPI.sftp.download(activeSessionId, filePath, localPath)
@@ -1683,7 +1693,7 @@ export default function App() {
       hasFile,
       fileName: ctx.file?.name,
       isDirectory: ctx.file?.type === 'd',
-      hasClipboard: !!fileClipboard,
+      hasClipboard: !!fileClipboard && fileClipboard.sessionId === activeSessionId,
       isMac: platform === 'darwin',
       onEdit: () => {
         if (!hasFile || !activeSessionId || !ctx.file || ctx.file.type === 'd') return
@@ -1702,7 +1712,7 @@ export default function App() {
       onPasteFile: () => fileOps.pasteFile(ctx.currentPath),
       onRename: () => {
         if (!ctx.file) return
-        ;(window as any).__fileManagerPanel?.startRename(ctx.file.name)
+        fileManagerPanelRef.current?.startRename(ctx.file.name)
       },
       onDelete: async () => {
         if (!ctx.file || !activeSessionId) return
@@ -1725,11 +1735,16 @@ export default function App() {
         if (!ctx.file || !activeSessionId) return
         let localPath = ''
         if (settings?.defaultDownloadPath) {
-          localPath = `${settings.defaultDownloadPath}\\${ctx.file.name}`
+          // 使用正确的路径分隔符：本地路径使用平台分隔符
+          const sep = settings.defaultDownloadPath.includes('\\') ? '\\' : '/'
+          localPath = `${settings.defaultDownloadPath}${sep}${ctx.file.name}`
         } else {
           const res = await window.electronAPI.dialog.selectDirectory()
           if (res.canceled || !res.filePaths.length) return
-          localPath = `${res.filePaths[0]}\\${ctx.file.name}`
+          // selectDirectory 返回的路径使用平台原生分隔符
+          const basePath = res.filePaths[0]
+          const sep = basePath.includes('\\') ? '\\' : '/'
+          localPath = `${basePath}${sep}${ctx.file.name}`
         }
         try {
           const downloadRes = await window.electronAPI.sftp.download(activeSessionId, filePath, localPath)
@@ -1904,7 +1919,11 @@ export default function App() {
           ref.fitAddon.fit()
           const dims = ref.fitAddon.proposeDimensions()
           if (dims) {
-            window.electronAPI.ssh.resize(activeSessionId, dims.cols, dims.rows)
+            if (activeSessionId.startsWith('local-')) {
+              window.electronAPI.pty.resize(activeSessionId, dims.cols, dims.rows)
+            } else {
+              window.electronAPI.ssh.resize(activeSessionId, dims.cols, dims.rows)
+            }
           }
         }, 50)
       }
@@ -3252,6 +3271,7 @@ ${historyStr.slice(-15000)}
                 {showFileManager && (
                   <div className="bottom-panel-section" style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 300, borderRight: showAiPanel ? '1px solid rgba(255,255,255,0.06)' : 'none', overflow: 'hidden' }}>
                     <FileManagerPanel
+                      ref={fileManagerPanelRef}
                       sessionId={activeSessionId}
                       settings={settings}
                       onClose={() => setShowFileManager(false)}
@@ -3262,7 +3282,7 @@ ${historyStr.slice(-15000)}
                         if (state.currentPath !== undefined) setFmCurrentPath(state.currentPath)
                         if (state.selectedFile !== undefined) setFmSelectedFile(state.selectedFile ?? null)
                       }}
-                      cutFilePath={fileClipboard?.mode === 'cut' ? fileClipboard.path : null}
+                      cutFilePath={fileClipboard?.mode === 'cut' && fileClipboard.sessionId === activeSessionId ? fileClipboard.path : null}
                       onEditFile={(filePath, fileName) => {
                         setEditingFile({ sessionId: activeSessionId, filePath, fileName })
                       }}

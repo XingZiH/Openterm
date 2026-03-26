@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
+import type { SFTPFile } from '../shared/sftp-file'
 
 export interface ElectronAPI {
   ssh: {
@@ -36,7 +37,7 @@ export interface ElectronAPI {
     compact: (messages: any[], settings: any) => Promise<any>
   }
   sftp: {
-    ls: (sessionId: string, remotePath: string) => Promise<{ success: boolean; data?: any[]; error?: string }>
+    ls: (sessionId: string, remotePath: string) => Promise<{ success: boolean; data?: SFTPFile[]; error?: string }>
     download: (sessionId: string, remotePath: string, localPath: string) => Promise<{ success: boolean; error?: string }>
     upload: (sessionId: string, localPath: string, remotePath: string) => Promise<{ success: boolean; error?: string }>
     move: (sessionId: string, srcPath: string, destPath: string) => Promise<{ success: boolean; error?: string }>
