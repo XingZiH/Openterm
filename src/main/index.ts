@@ -341,15 +341,21 @@ ipcMain.on('ssh:resize', (_e, sessionId: string, cols: number, rows: number) => 
 
 // Forward SSH data to renderer
 sshManager.on('data', (sessionId: string, data: string) => {
-  mainWindow?.webContents.send('ssh:data', sessionId, data)
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('ssh:data', sessionId, data)
+  }
 })
 
 sshManager.on('close', (sessionId: string) => {
-  mainWindow?.webContents.send('ssh:close', sessionId)
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('ssh:close', sessionId)
+  }
 })
 
 sshManager.on('error', (sessionId: string, error: string) => {
-  mainWindow?.webContents.send('ssh:error', sessionId, error)
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('ssh:error', sessionId, error)
+  }
 })
 
 // --- IPC: AI ---
@@ -514,6 +520,75 @@ ipcMain.handle('sftp:upload', async (_e, sessionId: string, localPath: string, r
     }
     await sshManager.sftpUpload(sessionId, localPath, remotePath)
     return { success: true }
+  } catch (err: any) {
+    return { success: false, error: err.message }
+  }
+})
+
+ipcMain.handle('sftp:uploadDir', async (_e, sessionId: string, localPath: string, remotePath: string) => {
+  const isLocal = sessionId.startsWith('local-')
+  const UPLOAD_CONCURRENCY = 8
+
+  try {
+    const uploadDirRecursive = async (localDir: string, remoteDir: string) => {
+      // Create remote directory
+      if (isLocal) {
+        await fsPromises.mkdir(remoteDir, { recursive: true })
+      } else {
+        await sshManager.exec(sessionId, `mkdir -p "${shellEscape(remoteDir)}"`)
+      }
+
+      const entries = await fsPromises.readdir(localDir, { withFileTypes: true })
+      const dirs: typeof entries = []
+      const files: typeof entries = []
+      for (const entry of entries) {
+        if (entry.isDirectory()) dirs.push(entry)
+        else if (entry.isFile()) files.push(entry)
+      }
+
+      // Recurse into subdirectories sequentially to avoid mkdir race conditions
+      for (const dir of dirs) {
+        const localEntryPath = join(localDir, dir.name)
+        const remoteEntryPath = isLocal ? join(remoteDir, dir.name) : `${remoteDir}/${dir.name}`
+        await uploadDirRecursive(localEntryPath, remoteEntryPath)
+      }
+
+      // Upload files with concurrency control
+      const errors: string[] = []
+      for (let i = 0; i < files.length; i += UPLOAD_CONCURRENCY) {
+        const batch = files.slice(i, i + UPLOAD_CONCURRENCY)
+        const results = await Promise.allSettled(batch.map(async (file) => {
+          const localEntryPath = join(localDir, file.name)
+          const remoteEntryPath = isLocal ? join(remoteDir, file.name) : `${remoteDir}/${file.name}`
+          if (isLocal) {
+            await localFileManager.upload(localEntryPath, remoteEntryPath)
+          } else {
+            await sshManager.sftpUpload(sessionId, localEntryPath, remoteEntryPath)
+          }
+        }))
+        for (let j = 0; j < results.length; j++) {
+          const r = results[j]
+          if (r.status === 'rejected') {
+            errors.push(`${batch[j].name}: ${r.reason?.message || r.reason}`)
+          }
+        }
+      }
+      if (errors.length > 0) {
+        throw new Error(`部分文件上传失败:\n${errors.join('\n')}`)
+      }
+    }
+
+    await uploadDirRecursive(localPath, remotePath)
+    return { success: true }
+  } catch (err: any) {
+    return { success: false, error: err.message }
+  }
+})
+
+ipcMain.handle('sftp:isLocalDirectory', async (_e, localPath: string) => {
+  try {
+    const stat = await fsPromises.stat(localPath)
+    return { success: true, isDirectory: stat.isDirectory() }
   } catch (err: any) {
     return { success: false, error: err.message }
   }

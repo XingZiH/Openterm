@@ -40,6 +40,8 @@ export interface ElectronAPI {
     ls: (sessionId: string, remotePath: string) => Promise<{ success: boolean; data?: SFTPFile[]; error?: string }>
     download: (sessionId: string, remotePath: string, localPath: string) => Promise<{ success: boolean; error?: string }>
     upload: (sessionId: string, localPath: string, remotePath: string) => Promise<{ success: boolean; error?: string }>
+    uploadDir: (sessionId: string, localPath: string, remotePath: string) => Promise<{ success: boolean; error?: string }>
+    isLocalDirectory: (localPath: string) => Promise<{ success: boolean; isDirectory?: boolean; error?: string }>
     move: (sessionId: string, srcPath: string, destPath: string) => Promise<{ success: boolean; error?: string }>
     copy: (sessionId: string, srcPath: string, destPath: string) => Promise<{ success: boolean; error?: string }>
     delete: (sessionId: string, targetPath: string) => Promise<{ success: boolean; error?: string }>
@@ -188,6 +190,8 @@ const api: ElectronAPI = {
     ls: (sessionId, remotePath) => ipcRenderer.invoke('sftp:ls', sessionId, remotePath),
     download: (sessionId, remotePath, localPath) => ipcRenderer.invoke('sftp:download', sessionId, remotePath, localPath),
     upload: (sessionId, localPath, remotePath) => ipcRenderer.invoke('sftp:upload', sessionId, localPath, remotePath),
+    uploadDir: (sessionId, localPath, remotePath) => ipcRenderer.invoke('sftp:uploadDir', sessionId, localPath, remotePath),
+    isLocalDirectory: (localPath) => ipcRenderer.invoke('sftp:isLocalDirectory', localPath),
     move: (sessionId, srcPath, destPath) => ipcRenderer.invoke('sftp:move', sessionId, srcPath, destPath),
     copy: (sessionId, srcPath, destPath) => ipcRenderer.invoke('sftp:copy', sessionId, srcPath, destPath),
     delete: (sessionId, targetPath) => ipcRenderer.invoke('sftp:delete', sessionId, targetPath),

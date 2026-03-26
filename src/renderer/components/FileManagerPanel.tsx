@@ -145,9 +145,18 @@ export const FileManagerPanel = forwardRef<FileManagerPanelHandle, FileManagerPa
       }
       const remotePath = currentPath.endsWith('/') ? `${currentPath}${file.name}` : `${currentPath}/${file.name}`
 
-      onToast(`开始上传 ${file.name}...`, 'info')
+      // Check if the dropped item is a directory
+      const dirCheck = await window.electronAPI.sftp.isLocalDirectory(localPath)
+      const isDirectory = dirCheck.success && dirCheck.isDirectory
+
+      onToast(`开始上传${isDirectory ? '文件夹' : ''} ${file.name}...`, 'info')
       try {
-        const uploadRes = await window.electronAPI.sftp.upload(sessionId, localPath, remotePath)
+        let uploadRes: { success: boolean; error?: string }
+        if (isDirectory) {
+          uploadRes = await window.electronAPI.sftp.uploadDir(sessionId, localPath, remotePath)
+        } else {
+          uploadRes = await window.electronAPI.sftp.upload(sessionId, localPath, remotePath)
+        }
         if (uploadRes.success) {
           onToast(`上传成功: ${file.name}`, 'success')
         } else {
