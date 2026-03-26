@@ -93,12 +93,9 @@ export const FileManagerPanel = forwardRef<FileManagerPanelHandle, FileManagerPa
           localPath = `${basePath}${sep}${file.name}`
         }
 
-        onToast(`开始下载 ${file.name}...`, 'info')
         try {
           const downloadRes = await window.electronAPI.sftp.download(sessionId, targetPath, localPath)
-          if (downloadRes.success) {
-            onToast(`下载成功: ${localPath}`, 'success')
-          } else {
+          if (!downloadRes.success) {
             onToast(`下载失败: ${downloadRes.error}`, 'error')
           }
         } catch (err: any) {
@@ -149,7 +146,6 @@ export const FileManagerPanel = forwardRef<FileManagerPanelHandle, FileManagerPa
       const dirCheck = await window.electronAPI.sftp.isLocalDirectory(localPath)
       const isDirectory = dirCheck.success && dirCheck.isDirectory
 
-      onToast(`开始上传${isDirectory ? '文件夹' : ''} ${file.name}...`, 'info')
       try {
         let uploadRes: { success: boolean; error?: string }
         if (isDirectory) {
@@ -157,9 +153,7 @@ export const FileManagerPanel = forwardRef<FileManagerPanelHandle, FileManagerPa
         } else {
           uploadRes = await window.electronAPI.sftp.upload(sessionId, localPath, remotePath)
         }
-        if (uploadRes.success) {
-          onToast(`上传成功: ${file.name}`, 'success')
-        } else {
+        if (!uploadRes.success) {
           onToast(`上传失败: ${uploadRes.error}`, 'error')
         }
       } catch (err: any) {

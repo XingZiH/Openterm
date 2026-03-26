@@ -1,6 +1,17 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { SFTPFile } from '../shared/sftp-file'
 
+export interface FileProgressEvent {
+  taskId: string
+  type: 'upload' | 'download' | 'copy' | 'delete' | 'move' | 'uploadDir'
+  fileName: string
+  status: 'started' | 'progress' | 'completed' | 'error'
+  progress: number
+  error?: string
+  totalBytes?: number
+  transferredBytes?: number
+}
+
 export interface ElectronAPI {
   ssh: {
     connect: (config: any) => Promise<{ success: boolean; sessionId?: string; error?: string }>
@@ -120,6 +131,9 @@ export interface ElectronAPI {
   config: {
     getPath: () => Promise<string>
     openFile: () => Promise<{ success: boolean; path: string }>
+  }
+  fileProgress: {
+    onProgress: (callback: (event: FileProgressEvent) => void) => () => void
   }
 }
 
@@ -274,6 +288,13 @@ const api: ElectronAPI = {
   config: {
     getPath: () => ipcRenderer.invoke('config:getPath'),
     openFile: () => ipcRenderer.invoke('config:openFile')
+  },
+  fileProgress: {
+    onProgress: (callback) => {
+      const handler = (_: any, event: FileProgressEvent) => callback(event)
+      ipcRenderer.on('file-progress', handler)
+      return () => ipcRenderer.removeListener('file-progress', handler)
+    }
   }
 }
 

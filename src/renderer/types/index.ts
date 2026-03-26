@@ -224,6 +224,17 @@ export function extractCommands(text: string): string[] {
 
 export type { SFTPFile }
 
+export interface FileProgressEvent {
+  taskId: string
+  type: 'upload' | 'download' | 'copy' | 'delete' | 'move' | 'uploadDir'
+  fileName: string
+  status: 'started' | 'progress' | 'completed' | 'error'
+  progress: number
+  error?: string
+  totalBytes?: number
+  transferredBytes?: number
+}
+
 declare global {
   interface Window {
     electronAPI: {
@@ -350,6 +361,9 @@ declare global {
         }) => void) => () => void
         sendFileContextAction: (requestId: string, actionId: string) => void
         notifyFileContextReady: () => void
+      }
+      fileProgress: {
+        onProgress: (callback: (event: FileProgressEvent) => void) => () => void
       }
     }
   }

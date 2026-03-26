@@ -27,6 +27,7 @@ import { SkillManagerModal } from './components/SkillManagerModal'
 import { FileManagerPanel, FileManagerPanelHandle } from './components/FileManagerPanel'
 import { FileEditorPanel } from './components/FileEditorPanel'
 import { ContextMenu, ContextMenuState, INITIAL_CONTEXT_MENU_STATE, buildTerminalMenuItems, buildFileMenuItems } from './components/ContextMenu'
+import { FileProgressPanel } from './components/FileProgressPanel'
 import { playStepComplete, playStepError, playWorkflowDone, playWorkflowStart } from './utils/workflow-sounds'
 
 // ===========================
@@ -1598,9 +1599,7 @@ export default function App() {
         }
         try {
           const downloadRes = await window.electronAPI.sftp.download(activeSessionId, filePath, localPath)
-          if (downloadRes.success) {
-            showToast(`下载成功: ${localPath}`, 'success')
-          } else {
+          if (!downloadRes.success) {
             showToast(`下载失败: ${downloadRes.error}`, 'error')
           }
         } catch (err: any) {
@@ -1760,9 +1759,7 @@ export default function App() {
         }
         try {
           const downloadRes = await window.electronAPI.sftp.download(activeSessionId, filePath, localPath)
-          if (downloadRes.success) {
-            showToast(`下载成功: ${localPath}`, 'success')
-          } else {
+          if (!downloadRes.success) {
             showToast(`下载失败: ${downloadRes.error}`, 'error')
           }
         } catch (err: any) {
@@ -4124,6 +4121,9 @@ ${historyStr.slice(-15000)}
 
       {/* Toast */}
       {toast && <div className={`toast ${toast.type}`}>{toast.message}<button className="toast-close" onClick={() => setToast(null)}>✕</button></div>}
+
+      {/* File Progress Panel */}
+      <FileProgressPanel />
     </div>
   )
 }

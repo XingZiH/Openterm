@@ -1,4 +1,5 @@
 import fs from 'fs/promises'
+import { createReadStream, createWriteStream } from 'fs'
 import path from 'path'
 import os from 'os'
 import { SFTPFile, createParentDirectoryEntry, sortSftpFiles } from '../shared/sftp-file'
@@ -57,11 +58,45 @@ export class LocalFileManager {
     return files
   }
 
-  async download(remotePath: string, localPath: string): Promise<void> {
+  async download(remotePath: string, localPath: string, onProgress?: (transferred: number, total: number) => void): Promise<void> {
+    if (onProgress) {
+      const stat = await fs.stat(remotePath)
+      const total = stat.size
+      let transferred = 0
+      return new Promise((resolve, reject) => {
+        const rs = createReadStream(remotePath)
+        const ws = createWriteStream(localPath)
+        rs.on('data', (chunk: Buffer) => {
+          transferred += chunk.length
+          onProgress(transferred, total)
+        })
+        rs.on('error', (err) => { ws.destroy(); reject(err) })
+        ws.on('error', (err) => { rs.destroy(); reject(err) })
+        ws.on('close', () => resolve())
+        rs.pipe(ws)
+      })
+    }
     await fs.copyFile(remotePath, localPath)
   }
 
-  async upload(localPath: string, remotePath: string): Promise<void> {
+  async upload(localPath: string, remotePath: string, onProgress?: (transferred: number, total: number) => void): Promise<void> {
+    if (onProgress) {
+      const stat = await fs.stat(localPath)
+      const total = stat.size
+      let transferred = 0
+      return new Promise((resolve, reject) => {
+        const rs = createReadStream(localPath)
+        const ws = createWriteStream(remotePath)
+        rs.on('data', (chunk: Buffer) => {
+          transferred += chunk.length
+          onProgress(transferred, total)
+        })
+        rs.on('error', (err) => { ws.destroy(); reject(err) })
+        ws.on('error', (err) => { rs.destroy(); reject(err) })
+        ws.on('close', () => resolve())
+        rs.pipe(ws)
+      })
+    }
     await fs.copyFile(localPath, remotePath)
   }
 

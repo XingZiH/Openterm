@@ -3,6 +3,7 @@ import { join } from 'path'
 import { readFileSync, promises as fsPromises } from 'fs'
 import { exec } from 'child_process'
 import { promisify } from 'util'
+import { randomUUID } from 'crypto'
 
 const execAsync = promisify(exec)
 import { SSHManager, shellEscape } from './ssh-manager'
@@ -46,6 +47,64 @@ let pendingFileContextMenuPayload: FileContextMenuRenderPayload | null = null
 let isFileContextMenuLoaded = false
 
 let mainWindow: BrowserWindow | null = null
+
+// --- File progress helper ---
+type FileProgressEvent = {
+  taskId: string
+  type: 'upload' | 'download' | 'copy' | 'delete' | 'move' | 'uploadDir'
+  fileName: string
+  status: 'started' | 'progress' | 'completed' | 'error'
+  progress: number
+  error?: string
+  totalBytes?: number
+  transferredBytes?: number
+}
+
+function sendFileProgress(event: FileProgressEvent) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('file-progress', event)
+  }
+}
+
+// Throttled progress sender: at most once per 100ms per task, but always sends started/completed/error immediately
+const progressThrottleMap = new Map<string, { timer: ReturnType<typeof setTimeout>; pending: FileProgressEvent | null }>()
+
+function sendFileProgressThrottled(event: FileProgressEvent) {
+  if (event.status !== 'progress') {
+    // started/completed/error: send immediately and clean up throttle
+    const entry = progressThrottleMap.get(event.taskId)
+    if (entry) {
+      clearInterval(entry.timer)
+      progressThrottleMap.delete(event.taskId)
+    }
+    sendFileProgress(event)
+    return
+  }
+
+  const existing = progressThrottleMap.get(event.taskId)
+  if (existing) {
+    // Already throttled: just update pending
+    existing.pending = event
+    return
+  }
+
+  // First progress event: send immediately, then throttle subsequent
+  sendFileProgress(event)
+  progressThrottleMap.set(event.taskId, {
+    pending: null,
+    timer: setInterval(() => {
+      const entry = progressThrottleMap.get(event.taskId)
+      if (entry?.pending) {
+        sendFileProgress(entry.pending)
+        entry.pending = null
+      }
+    }, 100)
+  })
+}
+
+function extractFileName(filePath: string): string {
+  return filePath.split(/[/\\]/).filter(Boolean).pop() || filePath
+}
 const sshManager = new SSHManager()
 const store = new Store()
 const aiService = new AiService()
@@ -500,27 +559,45 @@ ipcMain.handle('sftp:ls', async (_e, sessionId: string, path: string) => {
 })
 
 ipcMain.handle('sftp:download', async (_e, sessionId: string, remotePath: string, localPath: string) => {
+  const taskId = randomUUID()
+  const fileName = extractFileName(remotePath)
+  sendFileProgressThrottled({ taskId, type: 'download', fileName, status: 'started', progress: 0 })
   try {
-    if (sessionId.startsWith('local-')) {
-      await localFileManager.download(remotePath, localPath)
-      return { success: true }
+    const onProgress = (transferred: number, total: number) => {
+      const pct = total > 0 ? Math.round((transferred / total) * 100) : -1
+      sendFileProgressThrottled({ taskId, type: 'download', fileName, status: 'progress', progress: pct, transferredBytes: transferred, totalBytes: total })
     }
-    await sshManager.sftpDownload(sessionId, remotePath, localPath)
+    if (sessionId.startsWith('local-')) {
+      await localFileManager.download(remotePath, localPath, onProgress)
+    } else {
+      await sshManager.sftpDownload(sessionId, remotePath, localPath, onProgress)
+    }
+    sendFileProgressThrottled({ taskId, type: 'download', fileName, status: 'completed', progress: 100 })
     return { success: true }
   } catch (err: any) {
+    sendFileProgressThrottled({ taskId, type: 'download', fileName, status: 'error', progress: 0, error: err.message })
     return { success: false, error: err.message }
   }
 })
 
 ipcMain.handle('sftp:upload', async (_e, sessionId: string, localPath: string, remotePath: string) => {
+  const taskId = randomUUID()
+  const fileName = extractFileName(localPath)
+  sendFileProgressThrottled({ taskId, type: 'upload', fileName, status: 'started', progress: 0 })
   try {
-    if (sessionId.startsWith('local-')) {
-      await localFileManager.upload(localPath, remotePath)
-      return { success: true }
+    const onProgress = (transferred: number, total: number) => {
+      const pct = total > 0 ? Math.round((transferred / total) * 100) : -1
+      sendFileProgressThrottled({ taskId, type: 'upload', fileName, status: 'progress', progress: pct, transferredBytes: transferred, totalBytes: total })
     }
-    await sshManager.sftpUpload(sessionId, localPath, remotePath)
+    if (sessionId.startsWith('local-')) {
+      await localFileManager.upload(localPath, remotePath, onProgress)
+    } else {
+      await sshManager.sftpUpload(sessionId, localPath, remotePath, onProgress)
+    }
+    sendFileProgressThrottled({ taskId, type: 'upload', fileName, status: 'completed', progress: 100 })
     return { success: true }
   } catch (err: any) {
+    sendFileProgressThrottled({ taskId, type: 'upload', fileName, status: 'error', progress: 0, error: err.message })
     return { success: false, error: err.message }
   }
 })
@@ -528,10 +605,27 @@ ipcMain.handle('sftp:upload', async (_e, sessionId: string, localPath: string, r
 ipcMain.handle('sftp:uploadDir', async (_e, sessionId: string, localPath: string, remotePath: string) => {
   const isLocal = sessionId.startsWith('local-')
   const UPLOAD_CONCURRENCY = 8
+  const taskId = randomUUID()
+  const dirName = extractFileName(localPath)
+
+  // Count total files first
+  const countFiles = async (dir: string): Promise<number> => {
+    const entries = await fsPromises.readdir(dir, { withFileTypes: true })
+    let count = 0
+    for (const entry of entries) {
+      if (entry.isDirectory()) count += await countFiles(join(dir, entry.name))
+      else if (entry.isFile()) count++
+    }
+    return count
+  }
 
   try {
+    const totalFiles = await countFiles(localPath)
+    let uploadedFiles = 0
+
+    sendFileProgressThrottled({ taskId, type: 'uploadDir', fileName: dirName, status: 'started', progress: 0, totalBytes: totalFiles, transferredBytes: 0 })
+
     const uploadDirRecursive = async (localDir: string, remoteDir: string) => {
-      // Create remote directory
       if (isLocal) {
         await fsPromises.mkdir(remoteDir, { recursive: true })
       } else {
@@ -546,14 +640,12 @@ ipcMain.handle('sftp:uploadDir', async (_e, sessionId: string, localPath: string
         else if (entry.isFile()) files.push(entry)
       }
 
-      // Recurse into subdirectories sequentially to avoid mkdir race conditions
       for (const dir of dirs) {
         const localEntryPath = join(localDir, dir.name)
         const remoteEntryPath = isLocal ? join(remoteDir, dir.name) : `${remoteDir}/${dir.name}`
         await uploadDirRecursive(localEntryPath, remoteEntryPath)
       }
 
-      // Upload files with concurrency control
       const errors: string[] = []
       for (let i = 0; i < files.length; i += UPLOAD_CONCURRENCY) {
         const batch = files.slice(i, i + UPLOAD_CONCURRENCY)
@@ -570,6 +662,10 @@ ipcMain.handle('sftp:uploadDir', async (_e, sessionId: string, localPath: string
           const r = results[j]
           if (r.status === 'rejected') {
             errors.push(`${batch[j].name}: ${r.reason?.message || r.reason}`)
+          } else {
+            uploadedFiles++
+            const pct = totalFiles > 0 ? Math.round((uploadedFiles / totalFiles) * 100) : -1
+            sendFileProgressThrottled({ taskId, type: 'uploadDir', fileName: dirName, status: 'progress', progress: pct, totalBytes: totalFiles, transferredBytes: uploadedFiles })
           }
         }
       }
@@ -579,8 +675,10 @@ ipcMain.handle('sftp:uploadDir', async (_e, sessionId: string, localPath: string
     }
 
     await uploadDirRecursive(localPath, remotePath)
+    sendFileProgressThrottled({ taskId, type: 'uploadDir', fileName: dirName, status: 'completed', progress: 100 })
     return { success: true }
   } catch (err: any) {
+    sendFileProgressThrottled({ taskId, type: 'uploadDir', fileName: dirName, status: 'error', progress: 0, error: err.message })
     return { success: false, error: err.message }
   }
 })
@@ -595,27 +693,37 @@ ipcMain.handle('sftp:isLocalDirectory', async (_e, localPath: string) => {
 })
 
 ipcMain.handle('sftp:move', async (_e, sessionId: string, srcPath: string, destPath: string) => {
+  const taskId = randomUUID()
+  const fileName = extractFileName(srcPath)
+  sendFileProgressThrottled({ taskId, type: 'move', fileName, status: 'started', progress: -1 })
   try {
     if (sessionId.startsWith('local-')) {
       await localFileManager.move(srcPath, destPath)
-      return { success: true }
+    } else {
+      await sshManager.sftpMove(sessionId, srcPath, destPath)
     }
-    await sshManager.sftpMove(sessionId, srcPath, destPath)
+    sendFileProgressThrottled({ taskId, type: 'move', fileName, status: 'completed', progress: 100 })
     return { success: true }
   } catch (err: any) {
+    sendFileProgressThrottled({ taskId, type: 'move', fileName, status: 'error', progress: 0, error: err.message })
     return { success: false, error: err.message }
   }
 })
 
 ipcMain.handle('sftp:copy', async (_e, sessionId: string, srcPath: string, destPath: string) => {
+  const taskId = randomUUID()
+  const fileName = extractFileName(srcPath)
+  sendFileProgressThrottled({ taskId, type: 'copy', fileName, status: 'started', progress: -1 })
   try {
     if (sessionId.startsWith('local-')) {
       await localFileManager.copy(srcPath, destPath)
-      return { success: true }
+    } else {
+      await sshManager.sftpCopy(sessionId, srcPath, destPath)
     }
-    await sshManager.sftpCopy(sessionId, srcPath, destPath)
+    sendFileProgressThrottled({ taskId, type: 'copy', fileName, status: 'completed', progress: 100 })
     return { success: true }
   } catch (err: any) {
+    sendFileProgressThrottled({ taskId, type: 'copy', fileName, status: 'error', progress: 0, error: err.message })
     return { success: false, error: err.message }
   }
 })
@@ -678,6 +786,9 @@ ipcMain.handle('clipboard:writeText', (_e, text: string) => clipboard.writeText(
 
 // --- IPC: SFTP Delete ---
 ipcMain.handle('sftp:delete', async (_e, sessionId: string, targetPath: string) => {
+  const taskId = randomUUID()
+  const fileName = extractFileName(targetPath)
+  sendFileProgressThrottled({ taskId, type: 'delete', fileName, status: 'started', progress: -1 })
   try {
     if (sessionId.startsWith('local-')) {
       const stat = await fsPromises.stat(targetPath)
@@ -686,11 +797,13 @@ ipcMain.handle('sftp:delete', async (_e, sessionId: string, targetPath: string) 
       } else {
         await fsPromises.unlink(targetPath)
       }
-      return { success: true }
+    } else {
+      await sshManager.exec(sessionId, `rm -rf "${shellEscape(targetPath)}"`)
     }
-    await sshManager.exec(sessionId, `rm -rf "${shellEscape(targetPath)}"`)
+    sendFileProgressThrottled({ taskId, type: 'delete', fileName, status: 'completed', progress: 100 })
     return { success: true }
   } catch (err: any) {
+    sendFileProgressThrottled({ taskId, type: 'delete', fileName, status: 'error', progress: 0, error: err.message })
     return { success: false, error: err.message }
   }
 })

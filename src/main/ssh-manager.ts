@@ -207,20 +207,32 @@ export class SSHManager extends EventEmitter {
     })
   }
 
-  async sftpDownload(sessionId: string, remotePath: string, localPath: string): Promise<void> {
+  async sftpDownload(sessionId: string, remotePath: string, localPath: string, onProgress?: (transferred: number, total: number) => void): Promise<void> {
     const sftp = await this.getSftp(sessionId)
     return new Promise((resolve, reject) => {
-      sftp.fastGet(remotePath, localPath, { concurrency: 64, chunkSize: 32768 }, (err: Error | undefined) => {
+      const options: any = { concurrency: 64, chunkSize: 32768 }
+      if (onProgress) {
+        options.step = (transferred: number, _chunk: number, total: number) => {
+          onProgress(transferred, total)
+        }
+      }
+      sftp.fastGet(remotePath, localPath, options, (err: Error | undefined) => {
         if (err) return reject(err)
         resolve()
       })
     })
   }
 
-  async sftpUpload(sessionId: string, localPath: string, remotePath: string): Promise<void> {
+  async sftpUpload(sessionId: string, localPath: string, remotePath: string, onProgress?: (transferred: number, total: number) => void): Promise<void> {
     const sftp = await this.getSftp(sessionId)
     return new Promise((resolve, reject) => {
-      sftp.fastPut(localPath, remotePath, { concurrency: 64, chunkSize: 32768 }, (err: Error | undefined) => {
+      const options: any = { concurrency: 64, chunkSize: 32768 }
+      if (onProgress) {
+        options.step = (transferred: number, _chunk: number, total: number) => {
+          onProgress(transferred, total)
+        }
+      }
+      sftp.fastPut(localPath, remotePath, options, (err: Error | undefined) => {
         if (err) return reject(err)
         resolve()
       })

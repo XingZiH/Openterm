@@ -4452,3 +4452,291 @@ textarea.form-input {
   flex-shrink: 0;
 }
 
+/* ===== File Progress Panel ===== */
+.fp-panel {
+  position: fixed;
+  bottom: 16px;
+  right: 16px;
+  width: 360px;
+  max-height: 400px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-lg, 10px);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45), 0 2px 8px rgba(0, 0, 0, 0.25);
+  z-index: 300;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  animation: fpSlideIn 0.35s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+  backdrop-filter: blur(16px);
+}
+
+@keyframes fpSlideIn {
+  0% {
+    transform: translateY(24px) scale(0.95);
+    opacity: 0;
+  }
+  100% {
+    transform: translateY(0) scale(1);
+    opacity: 1;
+  }
+}
+
+.fp-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  background: var(--bg-tertiary);
+  border-bottom: 1px solid var(--border-subtle);
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.15s ease;
+}
+
+.fp-header:hover {
+  background: var(--bg-hover);
+}
+
+.fp-header-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.fp-collapse-icon {
+  font-size: 10px;
+  color: var(--text-muted);
+  transition: transform 0.25s ease;
+  display: inline-block;
+}
+
+.fp-collapse-icon.collapsed {
+  transform: rotate(-90deg);
+}
+
+.fp-header-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.fp-header-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.fp-clear-btn {
+  background: none;
+  border: 1px solid var(--border-primary);
+  color: var(--text-secondary);
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.fp-clear-btn:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+  border-color: var(--border-active);
+}
+
+.fp-task-list {
+  overflow-y: auto;
+  max-height: 320px;
+  padding: 6px;
+}
+
+.fp-task-list::-webkit-scrollbar {
+  width: 4px;
+}
+
+.fp-task-list::-webkit-scrollbar-thumb {
+  background: var(--border-primary);
+  border-radius: 2px;
+}
+
+.fp-task {
+  padding: 8px 10px;
+  border-radius: 6px;
+  margin-bottom: 4px;
+  background: var(--bg-card, var(--bg-primary));
+  border: 1px solid var(--border-subtle);
+  animation: fpTaskEnter 0.3s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+  transition: opacity 0.3s ease, border-color 0.2s ease;
+}
+
+@keyframes fpTaskEnter {
+  0% {
+    transform: translateX(20px);
+    opacity: 0;
+  }
+  100% {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+.fp-task:last-child {
+  margin-bottom: 0;
+}
+
+.fp-task-completed {
+  border-color: rgba(63, 185, 80, 0.3);
+}
+
+.fp-task-error-state {
+  border-color: rgba(248, 81, 73, 0.3);
+}
+
+.fp-task-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.fp-task-icon {
+  font-size: 14px;
+  flex-shrink: 0;
+  width: 20px;
+  text-align: center;
+}
+
+.fp-task-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.fp-task-name {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.fp-task-label {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.fp-task-dismiss {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 12px;
+  padding: 2px 4px;
+  cursor: pointer;
+  border-radius: 3px;
+  line-height: 1;
+  flex-shrink: 0;
+  opacity: 0;
+  transition: all 0.15s ease;
+}
+
+.fp-task:hover .fp-task-dismiss {
+  opacity: 1;
+}
+
+.fp-task-dismiss:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+.fp-progress-track {
+  height: 4px;
+  background: var(--bg-primary);
+  border-radius: 2px;
+  overflow: hidden;
+  position: relative;
+}
+
+.fp-progress-bar {
+  height: 100%;
+  border-radius: 2px;
+  transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  position: relative;
+}
+
+.fp-progress-bar::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.15) 50%,
+    transparent 100%
+  );
+  animation: fpShimmer 1.8s ease-in-out infinite;
+}
+
+@keyframes fpShimmer {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(200%); }
+}
+
+.fp-progress-started,
+.fp-progress-progress {
+  background: linear-gradient(90deg, var(--accent-blue), #79c0ff);
+}
+
+.fp-progress-completed {
+  background: linear-gradient(90deg, var(--accent-green), #56d364);
+  transition: width 0.5s ease;
+}
+
+.fp-progress-completed::after {
+  animation: none;
+}
+
+.fp-progress-error {
+  background: linear-gradient(90deg, var(--accent-red), #f97583);
+}
+
+.fp-progress-error::after {
+  animation: none;
+}
+
+.fp-progress-indeterminate {
+  width: 40% !important;
+  background: linear-gradient(90deg, var(--accent-blue), var(--accent-purple), var(--accent-blue));
+  background-size: 200% 100%;
+  animation: fpIndeterminate 1.6s ease-in-out infinite;
+}
+
+.fp-progress-indeterminate::after {
+  display: none;
+}
+
+@keyframes fpIndeterminate {
+  0% {
+    margin-left: 0%;
+    background-position: 0% 50%;
+  }
+  50% {
+    margin-left: 60%;
+    background-position: 100% 50%;
+  }
+  100% {
+    margin-left: 0%;
+    background-position: 0% 50%;
+  }
+}
+
+.fp-task-errmsg {
+  font-size: 11px;
+  color: var(--accent-red);
+  margin-top: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
