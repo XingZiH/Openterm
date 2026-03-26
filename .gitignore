@@ -1,8 +1,35 @@
+# Dependencies
 node_modules/
+
+# Build artifacts (electron-vite / electron-builder)
 out/
 dist/
-.DS_Store
+release/
+
+# TypeScript cache
+*.tsbuildinfo
+
+# Logs
 *.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# Environment files
 .env
+.env.*
+!.env.example
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+
+# Tool caches
 .ace-tool/
+.playwright-mcp/
+
+# Claude worktree cache
 /.claude/worktrees/*
+
