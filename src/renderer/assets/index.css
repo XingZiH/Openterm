@@ -4116,6 +4116,29 @@ textarea.form-input {
   background: rgba(255,255,255,0.06);
 }
 
+.fm-file-row.selected {
+  background: rgba(88, 166, 255, 0.18);
+}
+
+.fm-file-row.selected:hover {
+  background: rgba(88, 166, 255, 0.24);
+}
+
+/* Marquee selection rectangle */
+.fm-marquee {
+  position: absolute;
+  background: rgba(88, 166, 255, 0.12);
+  border: 1px solid rgba(88, 166, 255, 0.45);
+  border-radius: 2px;
+  pointer-events: none;
+  z-index: 5;
+}
+
+/* Disable text selection during marquee drag */
+.fm-content.fm-marqueeing {
+  user-select: none;
+}
+
 .td-name {
   display: flex;
   align-items: center;
