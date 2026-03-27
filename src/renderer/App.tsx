@@ -1060,8 +1060,9 @@ export default function App() {
   const [editingFile, setEditingFile] = useState<{ sessionId: string; filePath: string; fileName: string } | null>(null)
   const fileManagerPanelRef = useRef<FileManagerPanelHandle | null>(null)
   // File clipboard state for copy/cut operations
-  const [fileClipboard, setFileClipboard] = useState<{ path: string; mode: 'copy' | 'cut'; sessionId: string } | null>(null)
+  const [fileClipboard, setFileClipboard] = useState<{ paths: string[]; mode: 'copy' | 'cut'; sessionId: string } | null>(null)
   const [fmSelectedFile, setFmSelectedFile] = useState<SFTPFile | null>(null)
+  const [fmSelectedFiles, setFmSelectedFiles] = useState<SFTPFile[]>([])
   const [fmCurrentPath, setFmCurrentPath] = useState<string>('/')
   const [fmReloadToken, setFmReloadToken] = useState(0)
   // Workflow state
@@ -1510,16 +1511,18 @@ export default function App() {
 
     return {
       copyFile: () => {
-        if (!fmSelectedFile || !activeSessionId) return
-        const filePath = getSelectedFilePath()
-        setFileClipboard({ path: filePath, mode: 'copy', sessionId: activeSessionId })
-        showToast(`已复制: ${fmSelectedFile.name}`, 'success')
+        const filesToCopy = fmSelectedFiles.length > 0 ? fmSelectedFiles : (fmSelectedFile ? [fmSelectedFile] : [])
+        if (filesToCopy.length === 0 || !activeSessionId) return
+        const paths = filesToCopy.map(f => fmCurrentPath.endsWith('/') ? `${fmCurrentPath}${f.name}` : `${fmCurrentPath}/${f.name}`)
+        setFileClipboard({ paths, mode: 'copy', sessionId: activeSessionId })
+        showToast(`已复制 ${filesToCopy.length} 个文件`, 'success')
       },
       cutFile: () => {
-        if (!fmSelectedFile || !activeSessionId) return
-        const filePath = getSelectedFilePath()
-        setFileClipboard({ path: filePath, mode: 'cut', sessionId: activeSessionId })
-        showToast(`已剪切: ${fmSelectedFile.name}`, 'success')
+        const filesToCut = fmSelectedFiles.length > 0 ? fmSelectedFiles : (fmSelectedFile ? [fmSelectedFile] : [])
+        if (filesToCut.length === 0 || !activeSessionId) return
+        const paths = filesToCut.map(f => fmCurrentPath.endsWith('/') ? `${fmCurrentPath}${f.name}` : `${fmCurrentPath}/${f.name}`)
+        setFileClipboard({ paths, mode: 'cut', sessionId: activeSessionId })
+        showToast(`已剪切 ${filesToCut.length} 个文件`, 'success')
       },
       pasteFile: async (targetDir: string) => {
         if (!fileClipboard || !activeSessionId) return
@@ -1527,83 +1530,96 @@ export default function App() {
           showToast('暂不支持跨会话粘贴，请在原会话中粘贴', 'error')
           return
         }
-        const srcPath = fileClipboard.path
-        const fileName = srcPath.split('/').pop() || ''
-        const destPath = targetDir.endsWith('/') ? `${targetDir}${fileName}` : `${targetDir}/${fileName}`
 
-        if (srcPath === destPath) {
-          showToast('源路径与目标路径相同', 'error')
-          return
+        let failCount = 0
+        for (const srcPath of fileClipboard.paths) {
+          const fileName = srcPath.split('/').pop() || ''
+          const destPath = targetDir.endsWith('/') ? `${targetDir}${fileName}` : `${targetDir}/${fileName}`
+
+          if (srcPath === destPath) { failCount++; continue }
+
+          try {
+            const op = fileClipboard.mode === 'copy'
+              ? window.electronAPI.sftp.copy
+              : window.electronAPI.sftp.move
+            const res = await op(activeSessionId, srcPath, destPath)
+            if (!res.success) failCount++
+          } catch { failCount++ }
         }
 
-        try {
-          if (fileClipboard.mode === 'copy') {
-            const res = await window.electronAPI.sftp.copy(activeSessionId, srcPath, destPath)
-            if (res.success) {
-              showToast(`粘贴成功: ${fileName}`, 'success')
-              setFmReloadToken(t => t + 1)
-            } else {
-              showToast(`粘贴失败: ${res.error}`, 'error')
-            }
-          } else {
-            const res = await window.electronAPI.sftp.move(activeSessionId, srcPath, destPath)
-            if (res.success) {
-              showToast(`移动成功: ${fileName}`, 'success')
-              setFileClipboard(null)
-              setFmReloadToken(t => t + 1)
-            } else {
-              showToast(`移动失败: ${res.error}`, 'error')
-            }
-          }
-        } catch (err: any) {
-          showToast(`操作异常: ${err.message}`, 'error')
+        if (failCount === 0) {
+          showToast(`粘贴成功 ${fileClipboard.paths.length} 个文件`, 'success')
+        } else if (failCount < fileClipboard.paths.length) {
+          showToast(`粘贴完成: ${fileClipboard.paths.length - failCount} 成功, ${failCount} 失败`, 'error')
+        } else {
+          showToast(`粘贴失败`, 'error')
         }
+        if (fileClipboard.mode === 'cut') setFileClipboard(null)
+        setFmReloadToken(t => t + 1)
       },
       renameFile: () => {
         if (!fmSelectedFile) return
         fileManagerPanelRef.current?.startRename(fmSelectedFile.name)
       },
       deleteFile: async () => {
-        if (!fmSelectedFile || !activeSessionId) return
-        const filePath = getSelectedFilePath()
-        const confirmed = window.confirm(`确定要删除 "${fmSelectedFile.name}" 吗？此操作不可恢复。`)
+        const filesToDelete = fmSelectedFiles.length > 0 ? fmSelectedFiles : (fmSelectedFile ? [fmSelectedFile] : [])
+        if (filesToDelete.length === 0 || !activeSessionId) return
+
+        const nameList = filesToDelete.map(f => f.name).join('、')
+        const confirmed = window.confirm(`确定要删除以下 ${filesToDelete.length} 个文件吗？此操作不可恢复。\n\n${nameList}`)
         if (!confirmed) return
 
-        try {
-          const res = await window.electronAPI.sftp.delete(activeSessionId, filePath)
-          if (res.success) {
-            showToast(`已删除: ${fmSelectedFile.name}`, 'success')
-            setFmReloadToken(t => t + 1)
-          } else {
-            showToast(`删除失败: ${res.error}`, 'error')
+        let failCount = 0
+        for (const file of filesToDelete) {
+          const filePath = fmCurrentPath.endsWith('/') ? `${fmCurrentPath}${file.name}` : `${fmCurrentPath}/${file.name}`
+          try {
+            const res = await window.electronAPI.sftp.delete(activeSessionId, filePath)
+            if (!res.success) failCount++
+          } catch {
+            failCount++
           }
-        } catch (err: any) {
-          showToast(`删除异常: ${err.message}`, 'error')
         }
+
+        if (failCount === 0) {
+          showToast(`已删除 ${filesToDelete.length} 个文件`, 'success')
+        } else if (failCount < filesToDelete.length) {
+          showToast(`删除完成: ${filesToDelete.length - failCount} 成功, ${failCount} 失败`, 'error')
+        } else {
+          showToast(`删除失败`, 'error')
+        }
+        setFmReloadToken(t => t + 1)
       },
       downloadFile: async () => {
-        if (!fmSelectedFile || !activeSessionId) return
-        const filePath = getSelectedFilePath()
-        let localPath = ''
-        if (settings?.defaultDownloadPath) {
-          // 使用正确的路径分隔符：本地路径使用平台分隔符
-          const sep = settings.defaultDownloadPath.includes('\\') ? '\\' : '/'
-          localPath = `${settings.defaultDownloadPath}${sep}${fmSelectedFile.name}`
+        const filesToDownload = fmSelectedFiles.length > 0 ? fmSelectedFiles : (fmSelectedFile ? [fmSelectedFile] : [])
+        if (filesToDownload.length === 0 || !activeSessionId) return
+
+        const saveDir = settings?.defaultDownloadPath
+        let targetDir = ''
+        if (saveDir) {
+          targetDir = saveDir
         } else {
           const res = await window.electronAPI.dialog.selectDirectory()
           if (res.canceled || !res.filePaths.length) return
-          // selectDirectory 返回的路径使用平台原生分隔符
-          const basePath = res.filePaths[0]
-          const sep = basePath.includes('\\') ? '\\' : '/'
-          localPath = `${basePath}${sep}${fmSelectedFile.name}`
+          targetDir = res.filePaths[0]
         }
-        try {
-          const downloadRes = await window.electronAPI.sftp.download(activeSessionId, filePath, localPath)
-          if (!downloadRes.success) {
-            showToast(`下载失败: ${downloadRes.error}`, 'error')
-          }
-        } catch (err: any) {
-          showToast(`下载异常: ${err.message}`, 'error')
+
+        const sep = targetDir.includes('\\') ? '\\' : '/'
+        let failCount = 0
+        for (const file of filesToDownload) {
+          const remotePath = fmCurrentPath.endsWith('/') ? `${fmCurrentPath}${file.name}` : `${fmCurrentPath}/${file.name}`
+          const localPath = `${targetDir}${sep}${file.name}`
+          try {
+            const res = await window.electronAPI.sftp.download(activeSessionId, remotePath, localPath)
+            if (!res.success) failCount++
+          } catch { failCount++ }
+        }
+
+        if (failCount === 0) {
+          showToast(`已下载 ${filesToDownload.length} 个文件`, 'success')
+        } else if (failCount < filesToDownload.length) {
+          showToast(`下载完成: ${filesToDownload.length - failCount} 成功, ${failCount} 失败`, 'error')
+        } else {
+          showToast(`下载失败`, 'error')
         }
       },
       copyPath: () => {
@@ -1616,7 +1632,7 @@ export default function App() {
         setFmReloadToken(t => t + 1)
       }
     }
-  }, [activeSessionId, fmSelectedFile, fmCurrentPath, fileClipboard, settings])
+  }, [activeSessionId, fmSelectedFile, fmSelectedFiles, fmCurrentPath, fileClipboard, settings])
 
   // --- File manager keyboard shortcuts ---
   useEffect(() => {
@@ -1691,7 +1707,7 @@ export default function App() {
 
     window.addEventListener('keydown', handleFileKeyDown, true)
     return () => window.removeEventListener('keydown', handleFileKeyDown, true)
-  }, [showFileManager, activeSessionId, platform, fmSelectedFile, fileClipboard, fmCurrentPath, fileOps])
+  }, [showFileManager, activeSessionId, platform, fmSelectedFile, fmSelectedFiles, fileClipboard, fmCurrentPath, fileOps])
 
   // --- File manager context menu handler ---
   const handleFileContextMenu = useCallback((event: React.MouseEvent, ctx: { currentPath: string; file?: SFTPFile }) => {
@@ -1711,14 +1727,20 @@ export default function App() {
         setEditingFile({ sessionId: activeSessionId, filePath, fileName: ctx.file.name })
       },
       onCopyFile: () => {
-        if (!hasFile || !activeSessionId) return
-        setFileClipboard({ path: filePath, mode: 'copy', sessionId: activeSessionId })
-        showToast(`已复制: ${ctx.file!.name}`, 'success')
+        if (!activeSessionId) return
+        const filesToCopy = fmSelectedFiles.length > 0 ? fmSelectedFiles : (ctx.file ? [ctx.file] : [])
+        if (filesToCopy.length === 0) return
+        const paths = filesToCopy.map(f => ctx.currentPath.endsWith('/') ? `${ctx.currentPath}${f.name}` : `${ctx.currentPath}/${f.name}`)
+        setFileClipboard({ paths, mode: 'copy', sessionId: activeSessionId })
+        showToast(`已复制 ${filesToCopy.length} 个文件`, 'success')
       },
       onCutFile: () => {
-        if (!hasFile || !activeSessionId) return
-        setFileClipboard({ path: filePath, mode: 'cut', sessionId: activeSessionId })
-        showToast(`已剪切: ${ctx.file!.name}`, 'success')
+        if (!activeSessionId) return
+        const filesToCut = fmSelectedFiles.length > 0 ? fmSelectedFiles : (ctx.file ? [ctx.file] : [])
+        if (filesToCut.length === 0) return
+        const paths = filesToCut.map(f => ctx.currentPath.endsWith('/') ? `${ctx.currentPath}${f.name}` : `${ctx.currentPath}/${f.name}`)
+        setFileClipboard({ paths, mode: 'cut', sessionId: activeSessionId })
+        showToast(`已剪切 ${filesToCut.length} 个文件`, 'success')
       },
       onPasteFile: () => fileOps.pasteFile(ctx.currentPath),
       onRename: () => {
@@ -1726,44 +1748,66 @@ export default function App() {
         fileManagerPanelRef.current?.startRename(ctx.file.name)
       },
       onDelete: async () => {
-        if (!ctx.file || !activeSessionId) return
-        const confirmed = window.confirm(`确定要删除 "${ctx.file.name}" 吗？此操作不可恢复。`)
+        const filesToDelete = fmSelectedFiles.length > 0
+          ? fmSelectedFiles
+          : (ctx.file ? [ctx.file] : [])
+        if (filesToDelete.length === 0 || !activeSessionId) return
+
+        const nameList = filesToDelete.map(f => f.name).join('、')
+        const confirmed = window.confirm(`确定要删除以下 ${filesToDelete.length} 个文件吗？此操作不可恢复。\n\n${nameList}`)
         if (!confirmed) return
 
-        try {
-          const res = await window.electronAPI.sftp.delete(activeSessionId, filePath)
-          if (res.success) {
-            showToast(`已删除: ${ctx.file.name}`, 'success')
-            setFmReloadToken(t => t + 1)
-          } else {
-            showToast(`删除失败: ${res.error}`, 'error')
+        let failCount = 0
+        for (const file of filesToDelete) {
+          const fp = ctx.currentPath.endsWith('/') ? `${ctx.currentPath}${file.name}` : `${ctx.currentPath}/${file.name}`
+          try {
+            const res = await window.electronAPI.sftp.delete(activeSessionId, fp)
+            if (!res.success) failCount++
+          } catch {
+            failCount++
           }
-        } catch (err: any) {
-          showToast(`删除异常: ${err.message}`, 'error')
         }
+
+        if (failCount === 0) {
+          showToast(`已删除 ${filesToDelete.length} 个文件`, 'success')
+        } else if (failCount < filesToDelete.length) {
+          showToast(`删除完成: ${filesToDelete.length - failCount} 成功, ${failCount} 失败`, 'error')
+        } else {
+          showToast(`删除失败`, 'error')
+        }
+        setFmReloadToken(t => t + 1)
       },
       onDownload: async () => {
-        if (!ctx.file || !activeSessionId) return
-        let localPath = ''
-        if (settings?.defaultDownloadPath) {
-          // 使用正确的路径分隔符：本地路径使用平台分隔符
-          const sep = settings.defaultDownloadPath.includes('\\') ? '\\' : '/'
-          localPath = `${settings.defaultDownloadPath}${sep}${ctx.file.name}`
+        const filesToDownload = fmSelectedFiles.length > 0 ? fmSelectedFiles : (ctx.file ? [ctx.file] : [])
+        if (filesToDownload.length === 0 || !activeSessionId) return
+
+        const saveDir = settings?.defaultDownloadPath
+        let targetDir = ''
+        if (saveDir) {
+          targetDir = saveDir
         } else {
           const res = await window.electronAPI.dialog.selectDirectory()
           if (res.canceled || !res.filePaths.length) return
-          // selectDirectory 返回的路径使用平台原生分隔符
-          const basePath = res.filePaths[0]
-          const sep = basePath.includes('\\') ? '\\' : '/'
-          localPath = `${basePath}${sep}${ctx.file.name}`
+          targetDir = res.filePaths[0]
         }
-        try {
-          const downloadRes = await window.electronAPI.sftp.download(activeSessionId, filePath, localPath)
-          if (!downloadRes.success) {
-            showToast(`下载失败: ${downloadRes.error}`, 'error')
-          }
-        } catch (err: any) {
-          showToast(`下载异常: ${err.message}`, 'error')
+
+        const sep = targetDir.includes('\\') ? '\\' : '/'
+        let failCount = 0
+        for (const file of filesToDownload) {
+          const remotePath = ctx.currentPath.endsWith('/') ? `${ctx.currentPath}${file.name}` : `${ctx.currentPath}/${file.name}`
+          const localPath = `${targetDir}${sep}${file.name}`
+          try {
+            const res = await window.electronAPI.sftp.download(activeSessionId, remotePath, localPath)
+            if (!res.success) failCount++
+          } catch { failCount++ }
+        }
+
+        if (failCount === 0) {
+          showToast(`已下载 ${filesToDownload.length} 个文件`, 'success')
+        } else if (failCount < filesToDownload.length) {
+          showToast(`下载完成: ${filesToDownload.length - failCount} 成功, ${failCount} 失败`, 'error')
+        } else {
+          showToast(`下载失败`, 'error')
         }
       },
       onCopyPath: () => {
@@ -3317,8 +3361,9 @@ ${historyStr.slice(-15000)}
                       onStateChange={(state) => {
                         if (state.currentPath !== undefined) setFmCurrentPath(state.currentPath)
                         if (state.selectedFile !== undefined) setFmSelectedFile(state.selectedFile ?? null)
+                        if (state.selectedFiles !== undefined) setFmSelectedFiles(state.selectedFiles)
                       }}
-                      cutFilePath={fileClipboard?.mode === 'cut' && fileClipboard.sessionId === activeSessionId ? fileClipboard.path : null}
+                      cutFilePaths={fileClipboard?.mode === 'cut' && fileClipboard.sessionId === activeSessionId ? fileClipboard.paths : null}
                       onEditFile={(filePath, fileName) => {
                         setEditingFile({ sessionId: activeSessionId, filePath, fileName })
                       }}

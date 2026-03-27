@@ -13,13 +13,13 @@ interface FileManagerPanelProps {
   reloadToken?: number
   onStateChange?: (state: { currentPath?: string; selectedFile?: SFTPFile | null; selectedFiles?: SFTPFile[] }) => void
   onContextMenuRequest?: (event: React.MouseEvent, ctx: { currentPath: string; file?: SFTPFile }) => void
-  cutFilePath?: string | null
+  cutFilePaths?: string[] | null
   onEditFile?: (filePath: string, fileName: string) => void
 }
 
 const MARQUEE_THRESHOLD = 4
 
-export const FileManagerPanel = forwardRef<FileManagerPanelHandle, FileManagerPanelProps>(function FileManagerPanelInner({ sessionId, settings, onClose, onToast, reloadToken = 0, onStateChange, onContextMenuRequest, cutFilePath, onEditFile }, ref) {
+export const FileManagerPanel = forwardRef<FileManagerPanelHandle, FileManagerPanelProps>(function FileManagerPanelInner({ sessionId, settings, onClose, onToast, reloadToken = 0, onStateChange, onContextMenuRequest, cutFilePaths, onEditFile }, ref) {
   const [currentPath, setCurrentPath] = useState<string>('/')
   const [files, setFiles] = useState<SFTPFile[]>([])
   const [loading, setLoading] = useState<boolean>(false)
@@ -455,7 +455,7 @@ export const FileManagerPanel = forwardRef<FileManagerPanelHandle, FileManagerPa
               const isDraggable = file.name !== '..'
               const isSelected = selectedNames.has(file.name)
               const filePath = currentPath.endsWith('/') ? `${currentPath}${file.name}` : `${currentPath}/${file.name}`
-              const isCutTarget = cutFilePath === filePath
+              const isCutTarget = cutFilePaths?.includes(filePath) ?? false
               return (
                 <tr
                   key={file.name}
