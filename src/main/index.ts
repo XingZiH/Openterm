@@ -1,6 +1,7 @@
 import { app, BrowserWindow, ipcMain, shell, safeStorage, dialog, clipboard, screen } from 'electron'
-import { join } from 'path'
+import { join, dirname, basename, extname } from 'path'
 import { readFileSync, promises as fsPromises } from 'fs'
+import { cp as fsCp } from 'fs/promises'
 import { exec } from 'child_process'
 import { promisify } from 'util'
 import { randomUUID } from 'crypto'
@@ -105,6 +106,29 @@ function sendFileProgressThrottled(event: FileProgressEvent) {
 function extractFileName(filePath: string): string {
   return filePath.split(/[/\\]/).filter(Boolean).pop() || filePath
 }
+
+// Generate a unique local path by appending (1), (2), ... if the file already exists
+async function getUniqueLocalPath(targetPath: string): Promise<string> {
+  try {
+    await fsPromises.access(targetPath)
+  } catch {
+    return targetPath
+  }
+  const dir = dirname(targetPath)
+  const ext = extname(targetPath)
+  const base = basename(targetPath, ext)
+  let counter = 1
+  while (true) {
+    const candidate = join(dir, `${base} (${counter})${ext}`)
+    try {
+      await fsPromises.access(candidate)
+      counter++
+    } catch {
+      return candidate
+    }
+  }
+}
+
 const sshManager = new SSHManager()
 const store = new Store()
 const aiService = new AiService()
@@ -559,18 +583,22 @@ ipcMain.handle('sftp:ls', async (_e, sessionId: string, path: string) => {
 })
 
 ipcMain.handle('sftp:download', async (_e, sessionId: string, remotePath: string, localPath: string) => {
+  const uniquePath = await getUniqueLocalPath(localPath)
   const taskId = randomUUID()
   const fileName = extractFileName(remotePath)
   sendFileProgressThrottled({ taskId, type: 'download', fileName, status: 'started', progress: 0 })
   try {
+    // Ensure parent directory exists before downloading
+    await fsPromises.mkdir(dirname(uniquePath), { recursive: true })
+
     const onProgress = (transferred: number, total: number) => {
       const pct = total > 0 ? Math.round((transferred / total) * 100) : -1
       sendFileProgressThrottled({ taskId, type: 'download', fileName, status: 'progress', progress: pct, transferredBytes: transferred, totalBytes: total })
     }
     if (sessionId.startsWith('local-')) {
-      await localFileManager.download(remotePath, localPath, onProgress)
+      await localFileManager.download(remotePath, uniquePath, onProgress)
     } else {
-      await sshManager.sftpDownload(sessionId, remotePath, localPath, onProgress)
+      await sshManager.sftpDownload(sessionId, remotePath, uniquePath, onProgress)
     }
     sendFileProgressThrottled({ taskId, type: 'download', fileName, status: 'completed', progress: 100 })
     return { success: true }
@@ -688,6 +716,107 @@ ipcMain.handle('sftp:isLocalDirectory', async (_e, localPath: string) => {
     const stat = await fsPromises.stat(localPath)
     return { success: true, isDirectory: stat.isDirectory() }
   } catch (err: any) {
+    return { success: false, error: err.message }
+  }
+})
+
+ipcMain.handle('sftp:downloadDir', async (_e, sessionId: string, remotePath: string, localPath: string) => {
+  const isLocal = sessionId.startsWith('local-')
+  const DOWNLOAD_CONCURRENCY = 8
+  const taskId = randomUUID()
+  const uniquePath = await getUniqueLocalPath(localPath)
+  const dirName = extractFileName(remotePath)
+
+  try {
+    sendFileProgressThrottled({ taskId, type: 'downloadDir', fileName: dirName, status: 'started', progress: 0 })
+
+    // Count total files first
+    const countRemoteFiles = async (dir: string): Promise<number> => {
+      const list = await sshManager.sftpLs(sessionId, dir)
+      let count = 0
+      for (const item of list) {
+        if (item.name === '.' || item.name === '..') continue
+        const fullPath = `${dir === '/' ? '' : dir}/${item.name}`
+        if (item.type === 'd') {
+          count += await countRemoteFiles(fullPath)
+        } else if (item.type === '-' || item.type === 'l') {
+          count++
+        }
+      }
+      return count
+    }
+
+    let totalFiles: number
+    let downloadedFiles = 0
+
+    if (isLocal) {
+      // Local session: use fs.cp for recursive copy
+      totalFiles = await countRemoteFiles(remotePath)
+      await fsPromises.mkdir(uniquePath, { recursive: true })
+      sendFileProgressThrottled({ taskId, type: 'downloadDir', fileName: dirName, status: 'progress', progress: 0, totalBytes: totalFiles, transferredBytes: 0 })
+
+      // Use recursive cp for local-to-local (much faster)
+      await fsCp(remotePath, uniquePath, { recursive: true })
+      downloadedFiles = totalFiles
+    } else {
+      // SSH session: recursive SFTP download
+      totalFiles = await countRemoteFiles(remotePath)
+      sendFileProgressThrottled({ taskId, type: 'downloadDir', fileName: dirName, status: 'progress', progress: 0, totalBytes: totalFiles, transferredBytes: 0 })
+
+      const downloadDirRecursive = async (remoteDir: string, localDir: string) => {
+        await fsPromises.mkdir(localDir, { recursive: true })
+
+        const list = await sshManager.sftpLs(sessionId, remoteDir)
+        const dirs: typeof list = []
+        const files: typeof list = []
+        for (const item of list) {
+          if (item.name === '.' || item.name === '..') continue
+          if (item.type === 'd') dirs.push(item)
+          else if (item.type === '-' || item.type === 'l') files.push(item)
+        }
+
+        // Recurse into subdirectories first, collect errors
+        const allErrors: string[] = []
+        for (const dir of dirs) {
+          const remoteEntryPath = `${remoteDir === '/' ? '' : remoteDir}/${dir.name}`
+          const localEntryPath = join(localDir, dir.name)
+          const subErrors = await downloadDirRecursive(remoteEntryPath, localEntryPath)
+          allErrors.push(...subErrors)
+        }
+
+        // Download files in parallel batches
+        const batchErrors: string[] = []
+        for (let i = 0; i < files.length; i += DOWNLOAD_CONCURRENCY) {
+          const batch = files.slice(i, i + DOWNLOAD_CONCURRENCY)
+          const results = await Promise.allSettled(batch.map(async (file) => {
+            const remoteEntryPath = `${remoteDir === '/' ? '' : remoteDir}/${file.name}`
+            const localEntryPath = join(localDir, file.name)
+            await sshManager.sftpDownload(sessionId, remoteEntryPath, localEntryPath)
+          }))
+          for (let j = 0; j < results.length; j++) {
+            const r = results[j]
+            if (r.status === 'rejected') {
+              batchErrors.push(`${batch[j].name}: ${r.reason?.message || r.reason}`)
+            } else {
+              downloadedFiles++
+              const pct = totalFiles > 0 ? Math.round((downloadedFiles / totalFiles) * 100) : -1
+              sendFileProgressThrottled({ taskId, type: 'downloadDir', fileName: dirName, status: 'progress', progress: pct, totalBytes: totalFiles, transferredBytes: downloadedFiles })
+            }
+          }
+        }
+        return [...allErrors, ...batchErrors]
+      }
+
+      const allErrors = await downloadDirRecursive(remotePath, uniquePath)
+      if (allErrors.length > 0) {
+        throw new Error(`部分文件下载失败:\n${allErrors.join('\n')}`)
+      }
+    }
+
+    sendFileProgressThrottled({ taskId, type: 'downloadDir', fileName: dirName, status: 'completed', progress: 100 })
+    return { success: true }
+  } catch (err: any) {
+    sendFileProgressThrottled({ taskId, type: 'downloadDir', fileName: dirName, status: 'error', progress: 0, error: err.message })
     return { success: false, error: err.message }
   }
 })

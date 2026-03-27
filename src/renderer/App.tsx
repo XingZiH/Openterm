@@ -1593,10 +1593,10 @@ export default function App() {
         const filesToDownload = fmSelectedFiles.length > 0 ? fmSelectedFiles : (fmSelectedFile ? [fmSelectedFile] : [])
         if (filesToDownload.length === 0 || !activeSessionId) return
 
-        const saveDir = settings?.defaultDownloadPath
+        const defaultDir = settings?.defaultDownloadPath
         let targetDir = ''
-        if (saveDir) {
-          targetDir = saveDir
+        if (defaultDir) {
+          targetDir = defaultDir
         } else {
           const res = await window.electronAPI.dialog.selectDirectory()
           if (res.canceled || !res.filePaths.length) return
@@ -1605,21 +1605,31 @@ export default function App() {
 
         const sep = targetDir.includes('\\') ? '\\' : '/'
         let failCount = 0
+        let lastError = ''
         for (const file of filesToDownload) {
           const remotePath = fmCurrentPath.endsWith('/') ? `${fmCurrentPath}${file.name}` : `${fmCurrentPath}/${file.name}`
           const localPath = `${targetDir}${sep}${file.name}`
           try {
-            const res = await window.electronAPI.sftp.download(activeSessionId, remotePath, localPath)
-            if (!res.success) failCount++
-          } catch { failCount++ }
+            const downloadRes = file.type === 'd'
+              ? await window.electronAPI.sftp.downloadDir(activeSessionId, remotePath, localPath)
+              : await window.electronAPI.sftp.download(activeSessionId, remotePath, localPath)
+            if (!downloadRes.success) {
+              failCount++
+              lastError = downloadRes.error || '未知错误'
+            }
+          } catch (err: any) {
+            failCount++
+            lastError = err?.message || String(err)
+          }
         }
 
+        const total = filesToDownload.length
         if (failCount === 0) {
-          showToast(`已下载 ${filesToDownload.length} 个文件`, 'success')
-        } else if (failCount < filesToDownload.length) {
-          showToast(`下载完成: ${filesToDownload.length - failCount} 成功, ${failCount} 失败`, 'error')
+          showToast(`已下载 ${total} 个文件到 ${targetDir}`, 'success')
+        } else if (failCount < total) {
+          showToast(`下载完成: ${total - failCount} 成功, ${failCount} 失败${lastError ? ` (${lastError})` : ''}`, 'error')
         } else {
-          showToast(`下载失败`, 'error')
+          showToast(`下载失败${lastError ? `: ${lastError}` : ''}`, 'error')
         }
       },
       copyPath: () => {
@@ -1781,10 +1791,10 @@ export default function App() {
         const filesToDownload = fmSelectedFiles.length > 0 ? fmSelectedFiles : (ctx.file ? [ctx.file] : [])
         if (filesToDownload.length === 0 || !activeSessionId) return
 
-        const saveDir = settings?.defaultDownloadPath
+        const defaultDir = settings?.defaultDownloadPath
         let targetDir = ''
-        if (saveDir) {
-          targetDir = saveDir
+        if (defaultDir) {
+          targetDir = defaultDir
         } else {
           const res = await window.electronAPI.dialog.selectDirectory()
           if (res.canceled || !res.filePaths.length) return
@@ -1793,21 +1803,31 @@ export default function App() {
 
         const sep = targetDir.includes('\\') ? '\\' : '/'
         let failCount = 0
+        let lastError = ''
         for (const file of filesToDownload) {
           const remotePath = ctx.currentPath.endsWith('/') ? `${ctx.currentPath}${file.name}` : `${ctx.currentPath}/${file.name}`
           const localPath = `${targetDir}${sep}${file.name}`
           try {
-            const res = await window.electronAPI.sftp.download(activeSessionId, remotePath, localPath)
-            if (!res.success) failCount++
-          } catch { failCount++ }
+            const downloadRes = file.type === 'd'
+              ? await window.electronAPI.sftp.downloadDir(activeSessionId, remotePath, localPath)
+              : await window.electronAPI.sftp.download(activeSessionId, remotePath, localPath)
+            if (!downloadRes.success) {
+              failCount++
+              lastError = downloadRes.error || '未知错误'
+            }
+          } catch (err: any) {
+            failCount++
+            lastError = err?.message || String(err)
+          }
         }
 
+        const total = filesToDownload.length
         if (failCount === 0) {
-          showToast(`已下载 ${filesToDownload.length} 个文件`, 'success')
-        } else if (failCount < filesToDownload.length) {
-          showToast(`下载完成: ${filesToDownload.length - failCount} 成功, ${failCount} 失败`, 'error')
+          showToast(`已下载 ${total} 个文件到 ${targetDir}`, 'success')
+        } else if (failCount < total) {
+          showToast(`下载完成: ${total - failCount} 成功, ${failCount} 失败${lastError ? ` (${lastError})` : ''}`, 'error')
         } else {
-          showToast(`下载失败`, 'error')
+          showToast(`下载失败${lastError ? `: ${lastError}` : ''}`, 'error')
         }
       },
       onCopyPath: () => {

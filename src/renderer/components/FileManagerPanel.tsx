@@ -56,6 +56,16 @@ export const FileManagerPanel = forwardRef<FileManagerPanelHandle, FileManagerPa
   onStateChangeRef.current = onStateChange
   const filesRef = useRef(files)
   filesRef.current = files
+  const sessionIdRef = useRef(sessionId)
+  sessionIdRef.current = sessionId
+  const settingsRef = useRef(settings)
+  settingsRef.current = settings
+  const onToastRef = useRef(onToast)
+  onToastRef.current = onToast
+
+  // Drag-to-download state
+  const dragFilesRef = useRef<{ files: SFTPFile[]; currentPath: string } | null>(null)
+  const dragStartPosRef = useRef<{ x: number; y: number } | null>(null)
 
   const notifySelection = useCallback((names: Set<string>) => {
     if (names.size === 0) {
@@ -75,7 +85,7 @@ export const FileManagerPanel = forwardRef<FileManagerPanelHandle, FileManagerPa
         const normalized = path.replace(/\/+/g, '/')
         setCurrentPath(normalized)
         setSelectedNames(new Set())
-        onStateChange?.({ currentPath: normalized, selectedFile: null })
+        onStateChange?.({ currentPath: normalized, selectedFile: null, selectedFiles: [] })
       } else {
         onToast(`读取目录失败: ${res.error}`, 'error')
       }
@@ -95,7 +105,7 @@ export const FileManagerPanel = forwardRef<FileManagerPanelHandle, FileManagerPa
 
   useEffect(() => {
     setSelectedNames(new Set())
-    onStateChangeRef.current?.({ selectedFile: null })
+    onStateChangeRef.current?.({ selectedFile: null, selectedFiles: [] })
   }, [sessionId])
 
   const handleDoubleClick = async (file: SFTPFile) => {
@@ -360,6 +370,96 @@ export const FileManagerPanel = forwardRef<FileManagerPanelHandle, FileManagerPa
     }
   }, [notifySelection])
 
+  // --- Drag-to-download: detect drag-to-desktop and trigger download ---
+  // On Windows, Electron may NOT fire 'dragend' when the drop target is outside
+  // the BrowserWindow (e.g. desktop / Explorer). We listen to both 'dragend' and
+  // 'mouseup' (fallback) so the download is always triggered.
+  useEffect(() => {
+    const DRAG_DISTANCE_THRESHOLD = 50
+    let processed = false
+
+    const processDragDownload = async (endX: number | undefined, endY: number | undefined) => {
+      if (processed) return
+      processed = true
+
+      const drag = dragFilesRef.current
+      const startPos = dragStartPosRef.current
+      dragFilesRef.current = null
+      dragStartPosRef.current = null
+
+      if (!drag || !sessionIdRef.current) return
+
+      // Skip if drag distance is too short (accidental click/drag)
+      if (startPos && endX !== undefined && endY !== undefined) {
+        const dist = Math.abs(endX - startPos.x) + Math.abs(endY - startPos.y)
+        if (dist < DRAG_DISTANCE_THRESHOLD) return
+      }
+
+      // Delay to ensure drag operation is fully completed (especially on Windows)
+      await new Promise(resolve => setTimeout(resolve, 150))
+
+      // Determine save directory — always prompt for drag-to-download
+      // since Electron cannot detect the OS-level drop target path
+      const sid = sessionIdRef.current
+      const res = await window.electronAPI.dialog.selectDirectory()
+      if (res.canceled || !res.filePaths.length) return
+      const targetDir = res.filePaths[0]
+
+      const sep = targetDir.includes('\\') ? '\\' : '/'
+      const filesToDownload = drag.files
+      let failCount = 0
+      let lastError = ''
+      for (const file of filesToDownload) {
+        const remotePath = drag.currentPath.endsWith('/') ? `${drag.currentPath}${file.name}` : `${drag.currentPath}/${file.name}`
+        const localPath = `${targetDir}${sep}${file.name}`
+        try {
+          const res = file.type === 'd'
+            ? await window.electronAPI.sftp.downloadDir(sid, remotePath, localPath)
+            : await window.electronAPI.sftp.download(sid, remotePath, localPath)
+          if (!res.success) {
+            failCount++
+            lastError = res.error || '未知错误'
+          }
+        } catch (err: any) {
+          failCount++
+          lastError = err?.message || String(err)
+        }
+      }
+
+      const total = filesToDownload.length
+      const toast = onToastRef.current
+      if (failCount === 0) {
+        toast(`已下载 ${total} 个文件到 ${targetDir}`, 'success')
+      } else if (failCount < total) {
+        toast(`下载完成: ${total - failCount} 成功, ${failCount} 失败${lastError ? ` (${lastError})` : ''}`, 'error')
+      } else {
+        toast(`下载失败${lastError ? `: ${lastError}` : ''}`, 'error')
+      }
+    }
+
+    const handleDragEnd = (e: DragEvent) => {
+      processDragDownload(e.clientX, e.clientY)
+    }
+
+    const handleMouseUp = (e: MouseEvent) => {
+      if (!dragFilesRef.current) return
+      processDragDownload(e.clientX, e.clientY)
+    }
+
+    const handleDragStartGlobal = () => {
+      processed = false
+    }
+
+    document.addEventListener('dragend', handleDragEnd)
+    window.addEventListener('mouseup', handleMouseUp)
+    document.addEventListener('dragstart', handleDragStartGlobal)
+    return () => {
+      document.removeEventListener('dragend', handleDragEnd)
+      window.removeEventListener('mouseup', handleMouseUp)
+      document.removeEventListener('dragstart', handleDragStartGlobal)
+    }
+  }, [])
+
   const pathParts = currentPath.split('/').filter(Boolean)
 
   return (
@@ -503,6 +603,12 @@ export const FileManagerPanel = forwardRef<FileManagerPanelHandle, FileManagerPa
                     const remotePath = currentPath.endsWith('/') ? `${currentPath}${file.name}` : `${currentPath}/${file.name}`
                     e.dataTransfer.setData('application/sftp-file', JSON.stringify({ name: file.name, path: remotePath, size: file.size, type: file.type }))
                     e.dataTransfer.effectAllowed = 'copy'
+                    // Record for drag-to-desktop download
+                    const filesToDrag = selectedNames.size > 1
+                      ? files.filter(f => f.name !== '..' && selectedNames.has(f.name))
+                      : [file]
+                    dragFilesRef.current = { files: filesToDrag, currentPath }
+                    dragStartPosRef.current = { x: e.clientX, y: e.clientY }
                   }}
                   onDoubleClick={() => handleDoubleClick(file)}
                 >
