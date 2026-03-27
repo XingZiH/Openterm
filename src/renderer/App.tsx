@@ -1053,6 +1053,14 @@ export default function App() {
     placeholder?: string
     onConfirm: (value: string) => void
   }>({ visible: false, title: '', onConfirm: () => {} })
+  const [confirmModal, setConfirmModal] = useState<{
+    visible: boolean
+    title: string
+    message: string
+    confirmText?: string
+    cancelText?: string
+    onConfirm: () => void
+  }>({ visible: false, title: '', message: '', onConfirm: () => {} })
   const [promptValue, setPromptValue] = useState('')
   const promptInputRef = useRef<HTMLInputElement>(null)
   const fileMenuActionStateRef = useRef<{ requestId: string; actions: Record<string, () => void> }>({ requestId: '', actions: {} })
@@ -1561,33 +1569,39 @@ export default function App() {
         if (!fmSelectedFile) return
         fileManagerPanelRef.current?.startRename(fmSelectedFile.name)
       },
-      deleteFile: async () => {
+      deleteFile: () => {
         const filesToDelete = fmSelectedFiles.length > 0 ? fmSelectedFiles : (fmSelectedFile ? [fmSelectedFile] : [])
         if (filesToDelete.length === 0 || !activeSessionId) return
 
         const nameList = filesToDelete.map(f => f.name).join('、')
-        const confirmed = window.confirm(`确定要删除以下 ${filesToDelete.length} 个文件吗？此操作不可恢复。\n\n${nameList}`)
-        if (!confirmed) return
+        setConfirmModal({
+          visible: true,
+          title: '确认删除',
+          message: `确定要删除以下 ${filesToDelete.length} 个文件吗？此操作不可恢复。\n\n${nameList}`,
+          confirmText: '删除',
+          cancelText: '取消',
+          onConfirm: async () => {
+            let failCount = 0
+            for (const file of filesToDelete) {
+              const filePath = fmCurrentPath.endsWith('/') ? `${fmCurrentPath}${file.name}` : `${fmCurrentPath}/${file.name}`
+              try {
+                const res = await window.electronAPI.sftp.delete(activeSessionId, filePath)
+                if (!res.success) failCount++
+              } catch {
+                failCount++
+              }
+            }
 
-        let failCount = 0
-        for (const file of filesToDelete) {
-          const filePath = fmCurrentPath.endsWith('/') ? `${fmCurrentPath}${file.name}` : `${fmCurrentPath}/${file.name}`
-          try {
-            const res = await window.electronAPI.sftp.delete(activeSessionId, filePath)
-            if (!res.success) failCount++
-          } catch {
-            failCount++
+            if (failCount === 0) {
+              showToast(`已删除 ${filesToDelete.length} 个文件`, 'success')
+            } else if (failCount < filesToDelete.length) {
+              showToast(`删除完成: ${filesToDelete.length - failCount} 成功, ${failCount} 失败`, 'error')
+            } else {
+              showToast(`删除失败`, 'error')
+            }
+            setFmReloadToken(t => t + 1)
           }
-        }
-
-        if (failCount === 0) {
-          showToast(`已删除 ${filesToDelete.length} 个文件`, 'success')
-        } else if (failCount < filesToDelete.length) {
-          showToast(`删除完成: ${filesToDelete.length - failCount} 成功, ${failCount} 失败`, 'error')
-        } else {
-          showToast(`删除失败`, 'error')
-        }
-        setFmReloadToken(t => t + 1)
+        })
       },
       downloadFile: async () => {
         const filesToDownload = fmSelectedFiles.length > 0 ? fmSelectedFiles : (fmSelectedFile ? [fmSelectedFile] : [])
@@ -1757,35 +1771,41 @@ export default function App() {
         if (!ctx.file) return
         fileManagerPanelRef.current?.startRename(ctx.file.name)
       },
-      onDelete: async () => {
+      onDelete: () => {
         const filesToDelete = fmSelectedFiles.length > 0
           ? fmSelectedFiles
           : (ctx.file ? [ctx.file] : [])
         if (filesToDelete.length === 0 || !activeSessionId) return
 
         const nameList = filesToDelete.map(f => f.name).join('、')
-        const confirmed = window.confirm(`确定要删除以下 ${filesToDelete.length} 个文件吗？此操作不可恢复。\n\n${nameList}`)
-        if (!confirmed) return
+        setConfirmModal({
+          visible: true,
+          title: '确认删除',
+          message: `确定要删除以下 ${filesToDelete.length} 个文件吗？此操作不可恢复。\n\n${nameList}`,
+          confirmText: '删除',
+          cancelText: '取消',
+          onConfirm: async () => {
+            let failCount = 0
+            for (const file of filesToDelete) {
+              const fp = ctx.currentPath.endsWith('/') ? `${ctx.currentPath}${file.name}` : `${ctx.currentPath}/${file.name}`
+              try {
+                const res = await window.electronAPI.sftp.delete(activeSessionId, fp)
+                if (!res.success) failCount++
+              } catch {
+                failCount++
+              }
+            }
 
-        let failCount = 0
-        for (const file of filesToDelete) {
-          const fp = ctx.currentPath.endsWith('/') ? `${ctx.currentPath}${file.name}` : `${ctx.currentPath}/${file.name}`
-          try {
-            const res = await window.electronAPI.sftp.delete(activeSessionId, fp)
-            if (!res.success) failCount++
-          } catch {
-            failCount++
+            if (failCount === 0) {
+              showToast(`已删除 ${filesToDelete.length} 个文件`, 'success')
+            } else if (failCount < filesToDelete.length) {
+              showToast(`删除完成: ${filesToDelete.length - failCount} 成功, ${failCount} 失败`, 'error')
+            } else {
+              showToast(`删除失败`, 'error')
+            }
+            setFmReloadToken(t => t + 1)
           }
-        }
-
-        if (failCount === 0) {
-          showToast(`已删除 ${filesToDelete.length} 个文件`, 'success')
-        } else if (failCount < filesToDelete.length) {
-          showToast(`删除完成: ${filesToDelete.length - failCount} 成功, ${failCount} 失败`, 'error')
-        } else {
-          showToast(`删除失败`, 'error')
-        }
-        setFmReloadToken(t => t + 1)
+        })
       },
       onDownload: async () => {
         const filesToDownload = fmSelectedFiles.length > 0 ? fmSelectedFiles : (ctx.file ? [ctx.file] : [])
@@ -4179,6 +4199,33 @@ ${historyStr.slice(-15000)}
                   }
                 }}
               >确定</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Confirm Modal */}
+      {confirmModal.visible && (
+        <div className="modal-overlay" onClick={() => setConfirmModal(m => ({ ...m, visible: false }))}>
+          <div className="modal-content confirm-modal" style={{ width: 400 }} onClick={e => e.stopPropagation()}>
+            <div className="confirm-modal-body">
+              <div className="confirm-modal-icon">!</div>
+              <div className="confirm-modal-title">{confirmModal.title}</div>
+              <div className="confirm-modal-message" style={{ whiteSpace: 'pre-line' }}>{confirmModal.message}</div>
+            </div>
+            <div className="confirm-modal-footer">
+              <button className="btn btn-secondary" onClick={() => setConfirmModal(m => ({ ...m, visible: false }))}>
+                {confirmModal.cancelText || '取消'}
+              </button>
+              <button
+                className="btn btn-danger"
+                onClick={() => {
+                  setConfirmModal(m => ({ ...m, visible: false }))
+                  confirmModal.onConfirm()
+                }}
+              >
+                {confirmModal.confirmText || '确定'}
+              </button>
             </div>
           </div>
         </div>

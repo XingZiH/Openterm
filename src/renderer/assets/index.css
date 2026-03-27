@@ -2607,6 +2607,63 @@ textarea.form-input {
   transform: translateY(-1px);
 }
 
+.btn-danger {
+  background: var(--accent-red);
+  color: #fff;
+}
+
+.btn-danger:hover {
+  background: #e5443d;
+  box-shadow: 0 4px 12px rgba(248, 81, 73, 0.3);
+  transform: translateY(-1px);
+}
+
+/* Confirm Modal */
+.confirm-modal-icon {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  background: rgba(248, 81, 73, 0.12);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0 auto 16px;
+  font-size: 22px;
+  color: var(--accent-red);
+}
+
+.confirm-modal-body {
+  text-align: center;
+  padding: 24px 24px 8px;
+}
+
+.confirm-modal-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 8px;
+}
+
+.confirm-modal-message {
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+  word-break: break-all;
+  max-height: 120px;
+  overflow-y: auto;
+}
+
+.confirm-modal-footer {
+  padding: 16px 24px 20px;
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+}
+
+.confirm-modal-footer .btn {
+  min-width: 88px;
+}
+
 /* ==============================
    SETTINGS PAGE
    ============================== */
