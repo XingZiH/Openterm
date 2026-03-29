@@ -160,6 +160,7 @@ export interface AppSettings {
   termFontSize?: number
   termLineHeight?: number
   termTheme?: string
+  uiTheme?: 'dark' | 'light'
   termCursorStyle?: 'block' | 'underline' | 'bar'
   termCursorBlink?: boolean
   termOpacity?: number

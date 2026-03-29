@@ -17,6 +17,18 @@ export interface ConnectionConfig {
 
 export type AiProvider = 'openai' | 'anthropic' | 'ollama' | 'custom' | 'deepseek' | 'kimi' | 'qwen' | 'gemini' | 'groq' | 'xai' | 'custom-anthropic'
 
+export interface CredentialProfile {
+  id: string
+  name: string
+  username?: string
+  authType: 'password' | 'privateKey'
+  password?: string
+  privateKey?: string
+  passphrase?: string
+  createdAt: number
+  updatedAt: number
+}
+
 export interface AppSettings {
   ai: {
     provider: AiProvider
@@ -47,6 +59,7 @@ export interface AppSettings {
   termFontSize?: number
   termLineHeight?: number
   termTheme?: string
+  uiTheme?: 'dark' | 'light'
   termCursorStyle?: 'block' | 'underline' | 'bar'
   termCursorBlink?: boolean
   termOpacity?: number
@@ -228,6 +241,75 @@ export class Store {
   async clearAllChatHistory(): Promise<void> {
     const store = await this.getStore()
     store.set('chatHistory', [])
+  }
+
+  // --- Credential Profiles ---
+
+  async getCredentialProfiles(): Promise<CredentialProfile[]> {
+    const store = await this.getStore()
+    return (store.get('credentialProfiles') || []) as CredentialProfile[]
+  }
+
+  async saveCredentialProfile(profile: CredentialProfile): Promise<void> {
+    const store = await this.getStore()
+    const profiles = (store.get('credentialProfiles') || []) as CredentialProfile[]
+    const idx = profiles.findIndex((p: CredentialProfile) => p.id === profile.id)
+    if (idx >= 0) {
+      profiles[idx] = { ...profile, updatedAt: Date.now() }
+    } else {
+      profiles.push({ ...profile, createdAt: Date.now(), updatedAt: Date.now() })
+    }
+    store.set('credentialProfiles', profiles)
+  }
+
+  async deleteCredentialProfile(id: string): Promise<void> {
+    const store = await this.getStore()
+    const profiles = (store.get('credentialProfiles') || []) as CredentialProfile[]
+    store.set('credentialProfiles', profiles.filter((p: CredentialProfile) => p.id !== id))
+  }
+
+  async exportAll(): Promise<object> {
+    const store = await this.getStore()
+    return {
+      connections: store.get('connections') || [],
+      settings: store.get('settings') || {},
+      credentialProfiles: store.get('credentialProfiles') || [],
+      skills: store.get('skills') || []
+    }
+  }
+
+  async importAll(data: any): Promise<void> {
+    const store = await this.getStore()
+    // Merge connections
+    if (Array.isArray(data.connections)) {
+      const existing = (store.get('connections') || []) as ConnectionConfig[]
+      for (const conn of data.connections) {
+        const idx = existing.findIndex((c: ConnectionConfig) => c.id === conn.id)
+        if (idx >= 0) existing[idx] = conn
+        else existing.push(conn)
+      }
+      store.set('connections', existing)
+    }
+    // Merge credential profiles
+    if (Array.isArray(data.credentialProfiles)) {
+      const existing = (store.get('credentialProfiles') || []) as CredentialProfile[]
+      for (const profile of data.credentialProfiles) {
+        const idx = existing.findIndex((p: CredentialProfile) => p.id === profile.id)
+        if (idx >= 0) existing[idx] = profile
+        else existing.push(profile)
+      }
+      store.set('credentialProfiles', existing)
+    }
+    // Merge skills
+    if (Array.isArray(data.skills)) {
+      const existing = (store.get('skills') || []) as AgentSkill[]
+      for (const skill of data.skills) {
+        const idx = existing.findIndex((s: AgentSkill) => s.id === skill.id)
+        if (idx >= 0) existing[idx] = skill
+        else existing.push(skill)
+      }
+      store.set('skills', existing)
+    }
   }
 }
 
