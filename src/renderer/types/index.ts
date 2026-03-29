@@ -323,6 +323,7 @@ declare global {
         getPlatform: () => Promise<string>
         getSize: () => Promise<number[]>
         setSize: (width: number, height: number) => void
+        onBeforeClose: (callback: () => void) => () => void
       }
       pty: {
         spawn: (id: string, cwd?: string) => Promise<{ success: boolean; error?: string }>

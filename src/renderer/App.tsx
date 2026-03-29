@@ -1317,7 +1317,13 @@ export default function App() {
 
     const removeClose = window.electronAPI.ssh.onClose((sessionId) => {
       setSessions((prev) => prev.filter((s) => s.id !== sessionId))
-      terminalRefs.current.delete(sessionId)
+      // 正确 dispose 终端实例并移除 DOM 容器，防止残留渲染内容
+      const termRef = terminalRefs.current.get(sessionId)
+      if (termRef) {
+        termRef.terminal.dispose()
+        termRef.container.remove()
+        terminalRefs.current.delete(sessionId)
+      }
       setActiveSessionId((prev) => {
         if (prev === sessionId) return null
         return prev
@@ -1369,6 +1375,21 @@ export default function App() {
       removePtyData()
       removePtyExit()
     }
+  }, [])
+
+  // 窗口关闭前清理所有终端实例，防止 canvas 渲染残留到下次启动
+  useEffect(() => {
+    if (!window.electronAPI?.window?.onBeforeClose) return
+    const removeListener = window.electronAPI.window.onBeforeClose(() => {
+      terminalRefs.current.forEach((ref) => {
+        ref.terminal.dispose()
+        if (ref.container.parentNode) {
+          ref.container.remove()
+        }
+      })
+      terminalRefs.current.clear()
+    })
+    return removeListener
   }, [])
 
   // Auto scroll chat to bottom
@@ -1427,11 +1448,17 @@ export default function App() {
       },
       onSelectAll: () => ref.terminal.selectAll(),
       onClear: () => {
-        // 清除 xterm 滚动缓冲区
+        // 先 reset 重置终端状态（光标位置、SGR 颜色属性、字符集等），再 clear 清除缓冲区
+        // 不再手动调用 refresh()，避免与后续 shell 回传的 ANSI 清屏序列产生时序竞争
+        ref.terminal.reset()
         ref.terminal.clear()
-        // 发送 Ctrl+L 给 shell，清屏并重绘 prompt（不会回显命令文本）
+        // 发送清屏指令给 shell，同步清除 PTY 侧缓冲区并触发 prompt 重绘
         if (activeSessionId.startsWith('local-')) {
-          window.electronAPI.pty.write(activeSessionId, '\x0c')
+          if (platform === 'win32') {
+            window.electronAPI.pty.write(activeSessionId, 'cls\r')
+          } else {
+            window.electronAPI.pty.write(activeSessionId, '\x0c')
+          }
         } else {
           window.electronAPI.ssh.sendData(activeSessionId, '\x0c')
         }
@@ -1969,6 +1996,8 @@ export default function App() {
       const fitAddon = new FitAddon()
       terminal.loadAddon(fitAddon)
       terminal.open(container)
+      // 重置终端状态，防止复用残留的渲染样式（光标位置、SGR 属性等）
+      terminal.reset()
 
       setTimeout(() => {
         fitAddon.fit()

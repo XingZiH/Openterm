@@ -267,6 +267,16 @@ ipcMain.on('window:setSize', (_e, width: number, height: number) => {
   mainWindow.setSize(Math.max(900, width), Math.max(600, height || currentH), true)
 })
 
+// renderer 通知终端清理完成的信号
+let rendererCleanupDone = false
+ipcMain.on('window:before-close-done', () => {
+  rendererCleanupDone = true
+  // 如果 close 已被拦截等待中，重新触发关闭
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.close()
+  }
+})
+
 // --- IPC: File Context Menu Window ---
 ipcMain.handle('menu:fileContext:open', async (event, payload: {
   requestId: string
@@ -1092,11 +1102,22 @@ ipcMain.handle('sftp:writeFile', async (_e, sessionId: string, filePath: string,
 app.whenReady().then(() => {
   createWindow()
 
-  // Kill PTYs before window closes to prevent 'Object has been destroyed' errors
-  mainWindow?.on('close', () => {
+  // 窗口关闭流程：先通知 renderer 清理终端，等待确认后再 kill PTY/SSH 并真正关闭
+  mainWindow?.on('close', (e) => {
     hideFileContextMenuWindow()
-    localPtyManager.killAll()
-    sshManager.disconnectAll()
+    // 如果 renderer 已完成清理，直接执行关闭
+    if (rendererCleanupDone) {
+      localPtyManager.killAll()
+      sshManager.disconnectAll()
+      return
+    }
+    // 首次 close：拦截事件，通知 renderer 清理
+    e.preventDefault()
+    rendererCleanupDone = false
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('window:before-close')
+    }
+    // renderer 清理完成后会发送 'window:before-close-done'，触发二次 close
   })
 
   app.on('activate', () => {

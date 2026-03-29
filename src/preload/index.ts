@@ -90,6 +90,7 @@ export interface ElectronAPI {
     getPlatform: () => Promise<string>
     getSize: () => Promise<number[]>
     setSize: (width: number, height: number) => void
+    onBeforeClose: (callback: () => void) => () => void
   }
   pty: {
     spawn: (id: string, cwd?: string) => Promise<{ success: boolean; error?: string }>
@@ -243,7 +244,16 @@ const api: ElectronAPI = {
     isMaximized: () => ipcRenderer.invoke('window:isMaximized'),
     getPlatform: () => ipcRenderer.invoke('window:getPlatform'),
     getSize: () => ipcRenderer.invoke('window:getSize'),
-    setSize: (width: number, height: number) => ipcRenderer.send('window:setSize', width, height)
+    setSize: (width: number, height: number) => ipcRenderer.send('window:setSize', width, height),
+    onBeforeClose: (callback) => {
+      const handler = async () => {
+        callback()
+        // 通知 main 进程 renderer 已完成清理
+        ipcRenderer.send('window:before-close-done')
+      }
+      ipcRenderer.on('window:before-close', handler)
+      return () => ipcRenderer.removeListener('window:before-close', handler)
+    }
   },
   pty: {
     spawn: (id, cwd) => ipcRenderer.invoke('pty:spawn', id, cwd),
