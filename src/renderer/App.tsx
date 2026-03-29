@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
+﻿import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { createPortal } from 'react-dom'
 import {
   ConnectionConfig,
@@ -166,6 +166,155 @@ function ChatMessageView({
 // ===========================
 // COMPONENT: ConnectionForm
 // ===========================
+// ===========================
+// COMPONENT: CredentialManager
+// ===========================
+function CredentialManager({ showToast }: { showToast: (msg: string, type: 'success' | 'error') => void }) {
+  const [profiles, setProfiles] = useState<any[]>([])
+  const [editing, setEditing] = useState<any | null>(null)
+  const [showForm, setShowForm] = useState(false)
+  const [visiblePasswords, setVisiblePasswords] = useState<Record<string, boolean>>({})
+  const [editShowPass, setEditShowPass] = useState(false)
+  const [editShowPassphrase, setEditShowPassphrase] = useState(false)
+  const toggleVisible = (id: string) => setVisiblePasswords(prev => ({ ...prev, [id]: !prev[id] }))
+  const EyeIcon = ({ open }: { open: boolean }) => open
+    ? <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+    : <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+
+  const load = () => {
+    ;(window as any).electronAPI.credentials?.getAll?.().then((list: any[]) => setProfiles(list || [])).catch(() => {})
+  }
+
+  useEffect(() => { load() }, [])
+
+  const handleSave = async () => {
+    if (!editing?.name) return
+    const profile = { ...editing, id: editing.id || crypto.randomUUID(), createdAt: editing.createdAt || Date.now(), updatedAt: Date.now() }
+    await (window as any).electronAPI.credentials.save(profile)
+    showToast('凭证已保存', 'success')
+    setShowForm(false)
+    setEditing(null)
+    load()
+  }
+
+  const handleDelete = async (id: string) => {
+    await (window as any).electronAPI.credentials.delete(id)
+    showToast('凭证已删除', 'success')
+    load()
+  }
+
+  return (
+    <div>
+      {profiles.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 10 }}>
+          {profiles.map((p: any) => (
+            <div key={p.id} style={{ padding: '12px 16px', background: 'var(--bg-tertiary)', borderRadius: 8, border: '1px solid var(--border-subtle)' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr 1fr auto auto', alignItems: 'start', gap: 12 }}>
+                {/* 名称 */}
+                <div>
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 3 }}>名称</div>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>{p.name}</div>
+                </div>
+                {/* 用户名 */}
+                <div>
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 3 }}>用户名</div>
+                  <div style={{ fontSize: 13, color: 'var(--text-primary)' }}>{p.username || <span style={{ color: 'var(--text-muted)' }}>未设置</span>}</div>
+                </div>
+                {/* 认证方式 + 密码/私钥 */}
+                <div>
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 3 }}>认证方式</div>
+                  <div style={{ fontSize: 13 }}>
+                    {p.authType === 'privateKey'
+                      ? <span style={{ color: 'var(--accent-purple)' }}>🔑 私钥</span>
+                      : <span style={{ color: 'var(--accent-blue)' }}>🔒 密码</span>}
+                  </div>
+                </div>
+                {/* 密码/私钥内容 */}
+                <div>
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 3 }}>{p.authType === 'privateKey' ? '私钥密码' : '密码'}</div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <span style={{ fontSize: 13, fontFamily: 'var(--font-mono)', color: 'var(--text-primary)', letterSpacing: visiblePasswords[p.id] ? 0 : 2 }}>
+                      {p.authType === 'privateKey'
+                        ? (p.passphrase ? (visiblePasswords[p.id] ? p.passphrase : '••••••••') : <span style={{ color: 'var(--text-muted)' }}>无</span>)
+                        : (p.password ? (visiblePasswords[p.id] ? p.password : '••••••••') : <span style={{ color: 'var(--text-muted)' }}>未设置</span>)}
+                    </span>
+                    {((p.authType === 'privateKey' && p.passphrase) || (p.authType !== 'privateKey' && p.password)) && (
+                      <button onClick={() => toggleVisible(p.id)} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 2, color: 'var(--text-muted)', display: 'flex', alignItems: 'center' }}>
+                        <EyeIcon open={!!visiblePasswords[p.id]} />
+                      </button>
+                    )}
+                  </div>
+                </div>
+                {/* 私钥内容摘要（仅私钥模式） */}
+                <div>
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 3 }}>更新时间</div>
+                  <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{p.updatedAt ? new Date(p.updatedAt).toLocaleString('zh-CN', { month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit' }) : '—'}</div>
+                </div>
+                {/* 操作 */}
+                <button className="btn btn-secondary" style={{ padding: '4px 12px', fontSize: 12, alignSelf: 'center' }} onClick={() => { setEditing({ ...p }); setShowForm(true); setEditShowPass(false); setEditShowPassphrase(false) }}>编辑</button>
+                <button className="btn btn-secondary" style={{ padding: '4px 12px', fontSize: 12, color: 'var(--accent-red)', alignSelf: 'center' }} onClick={() => handleDelete(p.id)}>删除</button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      {!showForm ? (
+        <button className="btn btn-secondary" style={{ fontSize: 12 }} onClick={() => { setEditing({ authType: 'password' }); setShowForm(true) }}>+ 新建凭证配置</button>
+      ) : (
+        <div style={{ padding: 12, background: 'var(--bg-tertiary)', borderRadius: 8, border: '1px solid var(--border-primary)', display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 4 }}>{editing?.id ? '编辑凭证' : '新建凭证'}</div>
+          <div className="form-group">
+            <label className="form-label">配置名称</label>
+            <input className="form-input" placeholder="如：生产服务器组" value={editing?.name || ''} onChange={e => setEditing({ ...editing, name: e.target.value })} />
+          </div>
+          <div className="form-group">
+            <label className="form-label">用户名（可选）</label>
+            <input className="form-input" placeholder="root" value={editing?.username || ''} onChange={e => setEditing({ ...editing, username: e.target.value })} />
+          </div>
+          <div className="form-group">
+            <label className="form-label">认证方式</label>
+            <select className="form-select" value={editing?.authType || 'password'} onChange={e => setEditing({ ...editing, authType: e.target.value })}>
+              <option value="password">密码</option>
+              <option value="privateKey">私钥</option>
+            </select>
+          </div>
+          {editing?.authType === 'password' ? (
+            <div className="form-group">
+              <label className="form-label">密码</label>
+              <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
+                <input className="form-input" type={editShowPass ? 'text' : 'password'} placeholder="输入密码" style={{ paddingRight: 36 }} value={editing?.password || ''} onChange={e => setEditing({ ...editing, password: e.target.value })} />
+                <button type="button" onClick={() => setEditShowPass(v => !v)} style={{ position: 'absolute', right: 10, background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', padding: 0 }}>
+                  <EyeIcon open={editShowPass} />
+                </button>
+              </div>
+            </div>
+          ) : (
+            <>
+              <div className="form-group">
+                <label className="form-label">私钥内容</label>
+                <textarea className="form-input" rows={4} placeholder="粘贴 PEM 私钥内容" style={{ fontFamily: 'var(--font-mono)', fontSize: 11, resize: 'vertical' }} value={editing?.privateKey || ''} onChange={e => setEditing({ ...editing, privateKey: e.target.value })} />
+              </div>
+              <div className="form-group">
+                <label className="form-label">私钥密码（可选）</label>
+                <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
+                  <input className="form-input" type={editShowPassphrase ? 'text' : 'password'} placeholder="私钥保护密码" style={{ paddingRight: 36 }} value={editing?.passphrase || ''} onChange={e => setEditing({ ...editing, passphrase: e.target.value })} />
+                  <button type="button" onClick={() => setEditShowPassphrase(v => !v)} style={{ position: 'absolute', right: 10, background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', padding: 0 }}>
+                    <EyeIcon open={editShowPassphrase} />
+                  </button>
+                </div>
+              </div>
+            </>
+          )}
+          <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
+            <button className="btn btn-primary" style={{ fontSize: 12 }} onClick={handleSave}>保存</button>
+            <button className="btn btn-secondary" style={{ fontSize: 12 }} onClick={() => { setShowForm(false); setEditing(null) }}>取消</button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 function ConnectionForm({
   connection,
   onSave,
@@ -188,6 +337,11 @@ function ConnectionForm({
       group: ''
     }
   )
+  const [credProfiles, setCredProfiles] = useState<any[]>([])
+
+  useEffect(() => {
+    ;(window as any).electronAPI.credentials?.getAll?.().then((list: any[]) => setCredProfiles(list || [])).catch(() => {})
+  }, [])
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
@@ -245,6 +399,30 @@ function ConnectionForm({
                 onChange={(e) => setForm({ ...form, username: e.target.value })}
               />
             </div>
+            {credProfiles.length > 0 && (
+              <div className="form-group">
+                <label className="form-label">使用凭证配置（可选）</label>
+                <select className="form-select" defaultValue=""
+                  onChange={(e) => {
+                    const p = credProfiles.find((c: any) => c.id === e.target.value)
+                    if (!p) return
+                    setForm({
+                      ...form,
+                      username: p.username || form.username,
+                      authType: p.authType,
+                      password: p.password || '',
+                      privateKey: p.privateKey || '',
+                      passphrase: p.passphrase || ''
+                    })
+                  }}
+                >
+                  <option value="">-- 手动填写 --</option>
+                  {credProfiles.map((p: any) => (
+                    <option key={p.id} value={p.id}>{p.name}</option>
+                  ))}
+                </select>
+              </div>
+            )}
             <div className="form-group">
               <label className="form-label">认证方式</label>
               <select
@@ -310,14 +488,26 @@ function ConnectionForm({
 function SettingsPage({
   settings,
   onSave,
+  onPreview,
   showToast
 }: {
   settings: AppSettings
   onSave: (s: AppSettings) => void
+  onPreview?: (key: string, value: any) => void
   showToast: (msg: string, type: 'success' | 'error') => void
 }) {
   const [form, setForm] = useState(settings)
   const [isTesting, setIsTesting] = useState(false)
+  const [updateStatus, setUpdateStatus] = useState<{ status: string; version?: string; currentVersion?: string; percent?: number; error?: string } | null>(null)
+  const [checkingUpdate, setCheckingUpdate] = useState(false)
+
+  useEffect(() => {
+    const unsubscribe = (window as any).electronAPI?.app?.onUpdateStatus?.((info: any) => {
+      setUpdateStatus(info)
+      if (info.status !== 'checking') setCheckingUpdate(false)
+    })
+    return () => { if (unsubscribe) unsubscribe() }
+  }, [])
 
   useEffect(() => { setForm(settings) }, [settings])
 
@@ -374,18 +564,27 @@ function SettingsPage({
         <div className="form-group">
           <label className="form-label">字号</label>
           <input className="form-input" type="number" min="10" max="28" value={form.termFontSize ?? 13}
-            onChange={(e) => setForm({ ...form, termFontSize: parseInt(e.target.value) || 13 })} />
+            onChange={(e) => { const v = parseInt(e.target.value) || 13; setForm({ ...form, termFontSize: v }); onPreview?.('termFontSize', v) }} />
         </div>
         <div className="form-group">
           <label className="form-label">主题</label>
           <select className="form-select" value={form.termTheme ?? 'github-dark'}
-            onChange={(e) => setForm({ ...form, termTheme: e.target.value })}>
-            <option value="github-dark">GitHub Dark</option>
-            <option value="dracula">Dracula</option>
-            <option value="monokai">Monokai</option>
-            <option value="nord">Nord</option>
-            <option value="solarized">Solarized Dark</option>
-            <option value="gruvbox">Gruvbox</option>
+            onChange={(e) => { setForm({ ...form, termTheme: e.target.value }); onPreview?.('termTheme', e.target.value) }}>
+            <optgroup label="深色主题">
+              <option value="github-dark">GitHub Dark</option>
+              <option value="one-dark">One Dark</option>
+              <option value="dracula">Dracula</option>
+              <option value="monokai">Monokai</option>
+              <option value="nord">Nord</option>
+              <option value="solarized-dark">Solarized Dark</option>
+              <option value="gruvbox">Gruvbox</option>
+              <option value="tokyo-night">Tokyo Night</option>
+              <option value="catppuccin">Catppuccin Mocha</option>
+              <option value="rose-pine">Rosé Pine</option>
+            </optgroup>
+            <optgroup label="浅色主题">
+              <option value="light">Light</option>
+            </optgroup>
           </select>
         </div>
         <div className="form-group">
@@ -418,7 +617,7 @@ function SettingsPage({
         <div className="form-group">
           <label className="form-label">字体</label>
           <select className="form-select" value={form.termFontFamily ?? "'JetBrains Mono', 'SF Mono', 'Menlo', monospace"}
-            onChange={(e) => setForm({ ...form, termFontFamily: e.target.value })}>
+            onChange={(e) => { setForm({ ...form, termFontFamily: e.target.value }); onPreview?.('termFontFamily', e.target.value) }}>
             <option value="'JetBrains Mono', 'SF Mono', 'Menlo', monospace">JetBrains Mono</option>
             <option value="'SF Mono', 'Monaco', monospace">SF Mono</option>
             <option value="'Menlo', monospace">Menlo</option>
@@ -597,7 +796,7 @@ function SettingsPage({
                     <span key={m} style={{
                       display: 'inline-flex', alignItems: 'center', gap: 4,
                       padding: '3px 8px', borderRadius: 6, fontSize: 11, fontFamily: 'var(--font-mono)',
-                      background: m === form.ai.model ? 'rgba(99,102,241,0.2)' : 'rgba(255,255,255,0.06)',
+                      background: m === form.ai.model ? 'var(--bg-active)' : 'rgba(255,255,255,0.06)',
                       color: m === form.ai.model ? 'var(--accent)' : 'var(--text-secondary)',
                       border: m === form.ai.model ? '1px solid rgba(99,102,241,0.3)' : '1px solid transparent',
                       cursor: 'pointer'
@@ -649,6 +848,16 @@ function SettingsPage({
                       setForm({ ...form, ai: { ...form.ai, profiles }, _newModelInput: '' } as any)
                     }}
                   >+ 添加</button>
+                  <button className="btn btn-secondary" style={{ padding: '4px 10px', fontSize: 11 }}
+                    onClick={async () => {
+                      try {
+                        const result = await (window as any).electronAPI.ai.fetchModels(form.ai)
+                        const fetched = Array.isArray(result) ? result : (result?.models || [])
+                        if (!fetched || !fetched.length) { alert('未获取到模型列表，请检查 API Key 和 URL\n\n' + (result?.error || '')); return }
+                        setForm({ ...form, _fetchedModels: fetched, _showModelPicker: true } as any)
+                      } catch (e: any) { alert('拉取失败: ' + e.message) }
+                    }}
+                  >🔍 拉取模型</button>
                 </div>
               </div>
             )
@@ -657,6 +866,54 @@ function SettingsPage({
           <span style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 6, display: 'block' }}>
             每个 Profile 可配置多个模型，在聊天面板快速切换
           </span>
+
+          {/* 模型选择器弹窗 */}
+          {(form as any)._showModelPicker && (
+            <div style={{ marginTop: 8, padding: 12, background: 'var(--bg-tertiary)', borderRadius: 8, border: '1px solid var(--border-primary)' }}>
+              <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 8 }}>选择要添加的模型（可多选）</div>
+              <div style={{ maxHeight: 200, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 4 }}>
+                {((form as any)._fetchedModels || []).map((m: string) => {
+                  const profiles = form.ai.profiles || {}
+                  const name = form.ai.activeProfile!
+                  const models = profiles[name]?.models || []
+                  const checked = models.includes(m)
+                  return (
+                    <label key={m} style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', padding: '3px 6px', borderRadius: 4, background: checked ? 'var(--bg-active)' : 'transparent' }}>
+                      <input type="checkbox" checked={checked} onChange={(e) => {
+                        const p = { ...(form.ai.profiles || {}) }
+                        const n = form.ai.activeProfile!
+                        const ms = p[n]?.models || []
+                        p[n] = { ...p[n], models: e.target.checked ? [...ms, m] : ms.filter((x: string) => x !== m) }
+                        setForm({ ...form, ai: { ...form.ai, profiles: p } } as any)
+                      }} />
+                      <span style={{ fontSize: 12, fontFamily: 'var(--font-mono)' }}>{m}</span>
+                    </label>
+                  )
+                })}
+              </div>
+              <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                <button className="btn btn-secondary" style={{ fontSize: 11, padding: '3px 10px' }}
+                  onClick={() => setForm({ ...form, _showModelPicker: false } as any)}>
+                  完成
+                </button>
+                <button className="btn btn-secondary" style={{ fontSize: 11, padding: '3px 10px' }}
+                  onClick={() => {
+                    const p = { ...(form.ai.profiles || {}) }
+                    const n = form.ai.activeProfile!
+                    const all = (form as any)._fetchedModels || []
+                    p[n] = { ...p[n], models: all }
+                    setForm({ ...form, ai: { ...form.ai, profiles: p }, _showModelPicker: false } as any)
+                  }}>全选</button>
+                <button className="btn btn-secondary" style={{ fontSize: 11, padding: '3px 10px' }}
+                  onClick={() => {
+                    const p = { ...(form.ai.profiles || {}) }
+                    const n = form.ai.activeProfile!
+                    p[n] = { ...p[n], models: [] }
+                    setForm({ ...form, ai: { ...form.ai, profiles: p } } as any)
+                  }}>清空</button>
+              </div>
+            </div>
+          )}
         </div>
 
         <div className="form-group">
@@ -861,57 +1118,73 @@ function SettingsPage({
         </div>
       </div>
 
-      {/* File Manager Settings */}
-      <div className="settings-section" style={{ marginTop: 20 }}>
+      {/* Credential Profiles - full width */}
+      <div className="settings-section" style={{ gridColumn: '1 / -1' }}>
         <div className="settings-section-title">
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M2 3h12v10H2V3zm0 3h12M6 6v7"/></svg>
-          文件区设置
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><circle cx="8" cy="5" r="3"/><path d="M2 14c0-3.3 2.7-6 6-6s6 2.7 6 6"/><rect x="6" y="9" width="4" height="3" rx="1"/></svg>
+          凭证管理
         </div>
-        <div className="form-group">
-          <label className="form-label">默认下载路径</label>
-          <div style={{ display: 'flex', gap: 8 }}>
-            <input
-              className="form-input"
-              style={{ flex: 1 }}
-              placeholder="未设置（下载时每次询问）"
-              readOnly
-              value={form.defaultDownloadPath || ''}
-            />
-            <button
-              className="btn btn-secondary"
-              onClick={async () => {
-                const res = await window.electronAPI.dialog.selectDirectory()
-                if (!res.canceled && res.filePaths.length > 0) {
-                  setForm({ ...form, defaultDownloadPath: res.filePaths[0] })
-                }
-              }}
-            >
-              选择文件夹
-            </button>
-            {form.defaultDownloadPath && (
-              <button
-                className="btn btn-secondary"
-                onClick={() => setForm({ ...form, defaultDownloadPath: undefined })}
-              >
-                清除
-              </button>
-            )}
-          </div>
-        </div>
+        <CredentialManager showToast={showToast} />
       </div>
-      
       </div>
-      <div style={{ display: 'flex', gap: 12, marginTop: 24, alignItems: 'center' }}>
+      <div style={{ display: 'flex', gap: 12, marginTop: 24, alignItems: 'center', flexWrap: 'wrap' }}>
         <button className="btn btn-primary" onClick={handleSave}>
           保存设置
         </button>
         <button className="btn btn-secondary" onClick={async () => {
-          // 先保存一次确保文件存在
           handleSave()
           await (window as any).electronAPI.config.openFile()
         }}>
           📄 打开配置文件
         </button>
+        <button className="btn btn-secondary" onClick={async () => {
+          await (window as any).electronAPI.config.export()
+        }}>
+          ⬆ 导出配置
+        </button>
+        <button className="btn btn-secondary" onClick={async () => {
+          await (window as any).electronAPI.config.import()
+        }}>
+          ⬇ 导入配置
+        </button>
+        <button className="btn btn-secondary" onClick={async () => {
+          setCheckingUpdate(true)
+          setUpdateStatus({ status: 'checking' })
+          // Timeout fallback: main process handles 10s, add 12s safety net here
+          const timeout = setTimeout(() => {
+            setCheckingUpdate(false)
+            setUpdateStatus({ status: 'error', error: '检查超时，请检查网络连接' })
+          }, 12000)
+          ;(window as any).electronAPI.app.checkUpdate().finally(() => clearTimeout(timeout))
+        }} disabled={checkingUpdate || updateStatus?.status === 'downloading'}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ display: 'inline', marginRight: 5, verticalAlign: 'middle', animation: checkingUpdate ? 'spin 1s linear infinite' : 'none' }}><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+          {checkingUpdate ? '检查中...' : '检查更新'}
+        </button>
+        {updateStatus && (
+          <span style={{ fontSize: 12, display: 'flex', alignItems: 'center', gap: 6 }}>
+            {updateStatus.status === 'not-available' && (
+              <span style={{ color: 'var(--text-muted)' }}>✓ 当前已是最新版本</span>
+            )}
+            {updateStatus.status === 'available' && (
+              <span style={{ color: 'var(--accent-green)' }}>发现新版本 {updateStatus.version}，更新中...</span>
+            )}
+            {updateStatus.status === 'downloading' && (
+              <span style={{ color: 'var(--accent-blue)' }}>
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ display:'inline', marginRight:4, verticalAlign:'middle', animation:'spin 1s linear infinite' }}><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                更新中 {updateStatus.percent ?? 0}%
+              </span>
+            )}
+            {updateStatus.status === 'downloaded' && (
+              <span style={{ color: 'var(--accent-green)' }}>
+                ✓ 下载完成，即将重启安装...
+                {(() => { setTimeout(() => (window as any).electronAPI.app.installUpdate(), 2000); return null })()}
+              </span>
+            )}
+            {updateStatus.status === 'error' && (
+              <span style={{ color: 'var(--accent-red)' }}>⚠ 网络出错，请检查网络连接</span>
+            )}
+          </span>
+        )}
         <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
           设置同步到 openterm.jsonc，支持手动编辑
         </span>
@@ -972,6 +1245,34 @@ const TERMINAL_THEMES: Record<string, Record<string, string>> = {
     blue: '#458588', magenta: '#b16286', cyan: '#689d6a', white: '#a89984',
     brightBlack: '#928374', brightRed: '#fb4934', brightGreen: '#b8bb26', brightYellow: '#fabd2f',
     brightBlue: '#83a598', brightMagenta: '#d3869b', brightCyan: '#8ec07c', brightWhite: '#ebdbb2'
+  },
+  'light': {
+    background: '#ffffff', foreground: '#1a1f2e', cursor: '#0969da', selectionBackground: '#b3d4f5',
+    black: '#24292f', red: '#cf222e', green: '#1a7f37', yellow: '#9a6700',
+    blue: '#0969da', magenta: '#8250df', cyan: '#0550ae', white: '#6e7781',
+    brightBlack: '#57606a', brightRed: '#a40e26', brightGreen: '#116329', brightYellow: '#7d4e00',
+    brightBlue: '#0550ae', brightMagenta: '#6639ba', brightCyan: '#0140a8', brightWhite: '#24292f'
+  },
+  'tokyo-night': {
+    background: '#1a1b26', foreground: '#c0caf5', cursor: '#c0caf5', selectionBackground: '#283457',
+    black: '#15161e', red: '#f7768e', green: '#9ece6a', yellow: '#e0af68',
+    blue: '#7aa2f7', magenta: '#bb9af7', cyan: '#7dcfff', white: '#a9b1d6',
+    brightBlack: '#414868', brightRed: '#f7768e', brightGreen: '#9ece6a', brightYellow: '#e0af68',
+    brightBlue: '#7aa2f7', brightMagenta: '#bb9af7', brightCyan: '#7dcfff', brightWhite: '#c0caf5'
+  },
+  'catppuccin': {
+    background: '#1e1e2e', foreground: '#cdd6f4', cursor: '#f5e0dc', selectionBackground: '#585b70',
+    black: '#45475a', red: '#f38ba8', green: '#a6e3a1', yellow: '#f9e2af',
+    blue: '#89b4fa', magenta: '#cba6f7', cyan: '#89dceb', white: '#bac2de',
+    brightBlack: '#585b70', brightRed: '#f38ba8', brightGreen: '#a6e3a1', brightYellow: '#f9e2af',
+    brightBlue: '#89b4fa', brightMagenta: '#cba6f7', brightCyan: '#89dceb', brightWhite: '#a6adc8'
+  },
+  'rose-pine': {
+    background: '#191724', foreground: '#e0def4', cursor: '#e0def4', selectionBackground: '#403d52',
+    black: '#26233a', red: '#eb6f92', green: '#9ccfd8', yellow: '#f6c177',
+    blue: '#31748f', magenta: '#c4a7e7', cyan: '#ebbcba', white: '#e0def4',
+    brightBlack: '#6e6a86', brightRed: '#eb6f92', brightGreen: '#9ccfd8', brightYellow: '#f6c177',
+    brightBlue: '#31748f', brightMagenta: '#c4a7e7', brightCyan: '#ebbcba', brightWhite: '#e0def4'
   }
 }
 
@@ -1400,6 +1701,48 @@ export default function App() {
         }
       })
 
+      // Clipboard: Ctrl+Shift+C to copy, Ctrl+Shift+V to paste
+      terminal.attachCustomKeyEventHandler((event: KeyboardEvent) => {
+        if (event.ctrlKey && event.shiftKey && event.key === 'C' && event.type === 'keydown') {
+          const selection = terminal.getSelection()
+          if (selection) {
+            ;(window as any).electronAPI.clipboard.write(selection)
+          }
+          return false
+        }
+        if (event.ctrlKey && event.shiftKey && event.key === 'V' && event.type === 'keydown') {
+          ;(window as any).electronAPI.clipboard.read().then((text: string) => {
+            if (text) {
+              if (sessionId.startsWith('local-')) {
+                window.electronAPI.pty.write(sessionId, text)
+              } else {
+                window.electronAPI.ssh.sendData(sessionId, text)
+              }
+            }
+          })
+          return false
+        }
+        return true
+      })
+
+      // Right-click context menu
+      container.addEventListener('contextmenu', async (e) => {
+        e.preventDefault()
+        const selection = terminal.getSelection()
+        if (selection) {
+          await (window as any).electronAPI.clipboard.write(selection)
+        } else {
+          const text = await (window as any).electronAPI.clipboard.read()
+          if (text) {
+            if (sessionId.startsWith('local-')) {
+              window.electronAPI.pty.write(sessionId, text)
+            } else {
+              window.electronAPI.ssh.sendData(sessionId, text)
+            }
+          }
+        }
+      })
+
       terminalRefs.current.set(sessionId, { terminal, fitAddon, container })
     },
     []
@@ -1456,6 +1799,112 @@ export default function App() {
     observer.observe(terminalWrapperRef.current)
     return () => observer.disconnect()
   }, [activeSessionId])
+
+  // Sync data-theme attribute and inject CSS vars for UI theme
+  useEffect(() => {
+    const themeMap: Record<string, string> = {
+      'light': 'light', 'dracula': 'dracula', 'nord': 'nord',
+      'solarized-dark': 'solarized', 'monokai': 'monokai', 'gruvbox': 'gruvbox',
+      'one-dark': 'one-dark', 'tokyo-night': 'tokyo-night',
+      'catppuccin': 'catppuccin', 'rose-pine': 'rose-pine'
+    }
+    const uiThemeVars: Record<string, Record<string, string>> = {
+      'light': {
+        '--bg-primary':'#ffffff','--bg-secondary':'#f6f8fa','--bg-sidebar':'#f0f2f5','--bg-tertiary':'#eaecef',
+        '--bg-hover':'#e5e8ec','--bg-active':'#d8dde6','--bg-card':'#f8f9fb','--bg-input':'#ffffff',
+        '--text-primary':'#1a1f2e','--text-secondary':'#57606a','--text-muted':'#8c959f','--text-accent':'#0969da',
+        '--border-primary':'#d0d7de','--border-subtle':'#e4e8ec','--border-active':'#0969da',
+        '--accent-blue':'#0969da','--accent-green':'#1a7f37','--accent-red':'#cf222e','--accent-orange':'#9a6700','--accent-purple':'#8250df',
+        '--shadow-sm':'0 1px 3px rgba(0,0,0,0.1)','--shadow-md':'0 4px 12px rgba(0,0,0,0.15)','--shadow-lg':'0 8px 30px rgba(0,0,0,0.2)'
+      },
+      'dark': {
+        '--bg-primary':'rgba(13,17,23,0.98)','--bg-secondary':'rgba(22,27,34,0.96)','--bg-sidebar':'rgba(19,23,30,0.97)','--bg-tertiary':'rgba(28,35,51,0.95)',
+        '--bg-hover':'rgba(31,39,54,0.90)','--bg-active':'rgba(37,48,70,0.90)','--bg-card':'rgba(26,32,48,0.96)','--bg-input':'rgba(13,17,23,0.97)',
+        '--text-primary':'#e6edf3','--text-secondary':'#8b949e','--text-muted':'#6e7781','--text-accent':'#58a6ff',
+        '--border-primary':'#30363d','--border-subtle':'#21262d','--border-active':'#58a6ff',
+        '--accent-blue':'#58a6ff','--accent-green':'#3fb950','--accent-red':'#f85149','--accent-orange':'#d29922','--accent-purple':'#bc8cff',
+        '--shadow-sm':'0 1px 3px rgba(0,0,0,0.4)','--shadow-md':'0 4px 12px rgba(0,0,0,0.5)','--shadow-lg':'0 8px 30px rgba(0,0,0,0.6)'
+      },
+      'dracula': {
+        '--bg-primary':'rgba(40,42,54,0.98)','--bg-secondary':'rgba(33,34,44,0.96)','--bg-sidebar':'rgba(30,31,41,0.97)','--bg-tertiary':'rgba(45,47,63,0.95)',
+        '--bg-hover':'rgba(52,55,70,0.90)','--bg-active':'rgba(68,71,90,0.90)','--bg-card':'rgba(37,39,54,0.96)','--bg-input':'rgba(40,42,54,0.95)',
+        '--text-primary':'#f8f8f2','--text-secondary':'#bd93f9','--text-muted':'#6272a4','--text-accent':'#bd93f9',
+        '--border-primary':'#44475a','--border-subtle':'#343746','--border-active':'#bd93f9',
+        '--accent-blue':'#8be9fd','--accent-green':'#50fa7b','--accent-red':'#ff5555','--accent-orange':'#ffb86c','--accent-purple':'#bd93f9',
+        '--shadow-sm':'0 1px 3px rgba(0,0,0,0.4)','--shadow-md':'0 4px 12px rgba(0,0,0,0.5)','--shadow-lg':'0 8px 30px rgba(0,0,0,0.6)'
+      },
+      'nord': {
+        '--bg-primary':'rgba(46,52,64,0.98)','--bg-secondary':'rgba(59,66,82,0.96)','--bg-sidebar':'rgba(41,46,58,0.97)','--bg-tertiary':'rgba(67,76,94,0.95)',
+        '--bg-hover':'rgba(76,86,106,0.90)','--bg-active':'rgba(94,106,130,0.90)','--bg-card':'rgba(55,62,77,0.96)','--bg-input':'rgba(46,52,64,0.97)',
+        '--text-primary':'#eceff4','--text-secondary':'#d8dee9','--text-muted':'#81a1c1','--text-accent':'#88c0d0',
+        '--border-primary':'#4c566a','--border-subtle':'#434c5e','--border-active':'#88c0d0',
+        '--accent-blue':'#81a1c1','--accent-green':'#a3be8c','--accent-red':'#bf616a','--accent-orange':'#d08770','--accent-purple':'#b48ead',
+        '--shadow-sm':'0 1px 3px rgba(0,0,0,0.4)','--shadow-md':'0 4px 12px rgba(0,0,0,0.5)','--shadow-lg':'0 8px 30px rgba(0,0,0,0.6)'
+      },
+      'monokai': {
+        '--bg-primary':'rgba(39,40,34,0.98)','--bg-secondary':'rgba(30,31,28,0.96)','--bg-sidebar':'rgba(26,27,24,0.97)','--bg-tertiary':'rgba(45,46,42,0.95)',
+        '--bg-hover':'rgba(54,55,49,0.90)','--bg-active':'rgba(73,72,62,0.90)','--bg-card':'rgba(35,36,32,0.96)','--bg-input':'rgba(39,40,34,0.97)',
+        '--text-primary':'#f8f8f2','--text-secondary':'#cfcfc2','--text-muted':'#75715e','--text-accent':'#66d9e8',
+        '--border-primary':'#49483e','--border-subtle':'#363731','--border-active':'#a6e22e',
+        '--accent-blue':'#66d9e8','--accent-green':'#a6e22e','--accent-red':'#f92672','--accent-orange':'#fd971f','--accent-purple':'#ae81ff',
+        '--shadow-sm':'0 1px 3px rgba(0,0,0,0.4)','--shadow-md':'0 4px 12px rgba(0,0,0,0.5)','--shadow-lg':'0 8px 30px rgba(0,0,0,0.6)'
+      },
+      'gruvbox': {
+        '--bg-primary':'rgba(40,40,40,0.98)','--bg-secondary':'rgba(29,32,33,0.96)','--bg-sidebar':'rgba(26,26,26,0.97)','--bg-tertiary':'rgba(60,56,54,0.95)',
+        '--bg-hover':'rgba(80,73,69,0.90)','--bg-active':'rgba(102,92,84,0.90)','--bg-card':'rgba(36,36,36,0.96)','--bg-input':'rgba(40,40,40,0.97)',
+        '--text-primary':'#ebdbb2','--text-secondary':'#d5c4a1','--text-muted':'#928374','--text-accent':'#83a598',
+        '--border-primary':'#504945','--border-subtle':'#3c3836','--border-active':'#fabd2f',
+        '--accent-blue':'#83a598','--accent-green':'#b8bb26','--accent-red':'#fb4934','--accent-orange':'#fe8019','--accent-purple':'#d3869b',
+        '--shadow-sm':'0 1px 3px rgba(0,0,0,0.4)','--shadow-md':'0 4px 12px rgba(0,0,0,0.5)','--shadow-lg':'0 8px 30px rgba(0,0,0,0.6)'
+      },
+      'one-dark': {
+        '--bg-primary':'rgba(40,44,52,0.98)','--bg-secondary':'rgba(33,37,43,0.96)','--bg-sidebar':'rgba(30,34,39,0.97)','--bg-tertiary':'rgba(44,49,60,0.95)',
+        '--bg-hover':'rgba(50,56,66,0.90)','--bg-active':'rgba(62,68,81,0.90)','--bg-card':'rgba(37,41,48,0.96)','--bg-input':'rgba(40,44,52,0.97)',
+        '--text-primary':'#abb2bf','--text-secondary':'#9199a6','--text-muted':'#5c6370','--text-accent':'#61afef',
+        '--border-primary':'#3e4451','--border-subtle':'#2c313c','--border-active':'#61afef',
+        '--accent-blue':'#61afef','--accent-green':'#98c379','--accent-red':'#e06c75','--accent-orange':'#e5c07b','--accent-purple':'#c678dd',
+        '--shadow-sm':'0 1px 3px rgba(0,0,0,0.4)','--shadow-md':'0 4px 12px rgba(0,0,0,0.5)','--shadow-lg':'0 8px 30px rgba(0,0,0,0.6)'
+      },
+      'tokyo-night': {
+        '--bg-primary':'rgba(26,27,38,0.98)','--bg-secondary':'rgba(22,22,30,0.96)','--bg-sidebar':'rgba(19,19,26,0.97)','--bg-tertiary':'rgba(31,35,53,0.95)',
+        '--bg-hover':'rgba(41,46,66,0.90)','--bg-active':'rgba(54,74,130,0.85)','--bg-card':'rgba(26,27,38,0.96)','--bg-input':'rgba(26,27,38,0.97)',
+        '--text-primary':'#c0caf5','--text-secondary':'#a9b1d6','--text-muted':'#565f89','--text-accent':'#7aa2f7',
+        '--border-primary':'#292e42','--border-subtle':'#1f2335','--border-active':'#7aa2f7',
+        '--accent-blue':'#7aa2f7','--accent-green':'#9ece6a','--accent-red':'#f7768e','--accent-orange':'#e0af68','--accent-purple':'#bb9af7',
+        '--shadow-sm':'0 1px 3px rgba(0,0,0,0.4)','--shadow-md':'0 4px 12px rgba(0,0,0,0.5)','--shadow-lg':'0 8px 30px rgba(0,0,0,0.6)'
+      },
+      'catppuccin': {
+        '--bg-primary':'rgba(30,30,46,0.98)','--bg-secondary':'rgba(24,24,37,0.96)','--bg-sidebar':'rgba(22,22,34,0.97)','--bg-tertiary':'rgba(49,50,68,0.95)',
+        '--bg-hover':'rgba(69,71,90,0.90)','--bg-active':'rgba(88,91,112,0.90)','--bg-card':'rgba(30,30,46,0.96)','--bg-input':'rgba(30,30,46,0.97)',
+        '--text-primary':'#cdd6f4','--text-secondary':'#bac2de','--text-muted':'#6c7086','--text-accent':'#89b4fa',
+        '--border-primary':'#45475a','--border-subtle':'#313244','--border-active':'#89b4fa',
+        '--accent-blue':'#89b4fa','--accent-green':'#a6e3a1','--accent-red':'#f38ba8','--accent-orange':'#fab387','--accent-purple':'#cba6f7',
+        '--shadow-sm':'0 1px 3px rgba(0,0,0,0.4)','--shadow-md':'0 4px 12px rgba(0,0,0,0.5)','--shadow-lg':'0 8px 30px rgba(0,0,0,0.6)'
+      },
+      'rose-pine': {
+        '--bg-primary':'rgba(25,23,36,0.98)','--bg-secondary':'rgba(31,29,46,0.96)','--bg-sidebar':'rgba(26,24,38,0.97)','--bg-tertiary':'rgba(38,35,58,0.95)',
+        '--bg-hover':'rgba(64,61,82,0.90)','--bg-active':'rgba(82,79,103,0.90)','--bg-card':'rgba(31,29,46,0.96)','--bg-input':'rgba(25,23,36,0.97)',
+        '--text-primary':'#e0def4','--text-secondary':'#908caa','--text-muted':'#6e6a86','--text-accent':'#9ccfd8',
+        '--border-primary':'#403d52','--border-subtle':'#26233a','--border-active':'#9ccfd8',
+        '--accent-blue':'#9ccfd8','--accent-green':'#31748f','--accent-red':'#eb6f92','--accent-orange':'#f6c177','--accent-purple':'#c4a7e7',
+        '--shadow-sm':'0 1px 3px rgba(0,0,0,0.4)','--shadow-md':'0 4px 12px rgba(0,0,0,0.5)','--shadow-lg':'0 8px 30px rgba(0,0,0,0.6)'
+      },
+      'solarized': {
+        '--bg-primary':'rgba(0,43,54,0.98)','--bg-secondary':'rgba(7,54,66,0.96)','--bg-sidebar':'rgba(0,33,43,0.97)','--bg-tertiary':'rgba(7,54,66,0.95)',
+        '--bg-hover':'rgba(13,69,85,0.90)','--bg-active':'rgba(26,92,110,0.90)','--bg-card':'rgba(7,54,66,0.96)','--bg-input':'rgba(0,43,54,0.97)',
+        '--text-primary':'#839496','--text-secondary':'#657b83','--text-muted':'#586e75','--text-accent':'#268bd2',
+        '--border-primary':'#073642','--border-subtle':'#002b36','--border-active':'#268bd2',
+        '--accent-blue':'#268bd2','--accent-green':'#859900','--accent-red':'#dc322f','--accent-orange':'#cb4b16','--accent-purple':'#6c71c4',
+        '--shadow-sm':'0 1px 3px rgba(0,0,0,0.4)','--shadow-md':'0 4px 12px rgba(0,0,0,0.5)','--shadow-lg':'0 8px 30px rgba(0,0,0,0.6)'
+      }
+    }
+    const themeKey = themeMap[termTheme] || 'dark'
+    const vars = uiThemeVars[themeKey] || uiThemeVars['dark'] || {}
+    const root = document.documentElement
+    root.setAttribute('data-theme', themeKey)
+    // Apply vars directly via JS to guarantee override over :root
+    Object.entries(vars).forEach(([k, v]) => root.style.setProperty(k, v))
+  }, [termTheme])
 
   // Apply terminal settings to all instances
   useEffect(() => {
@@ -2608,13 +3057,21 @@ ${historyStr.slice(-15000)}
                 <div className="term-toolbar-group">
                   <span className="term-toolbar-label">主题</span>
                   <select className="term-toolbar-select" value={termTheme} onChange={(e) => setTermTheme(e.target.value)}>
-                    <option value="github-dark">GitHub Dark</option>
-                    <option value="dracula">Dracula</option>
-                    <option value="monokai">Monokai</option>
-                    <option value="nord">Nord</option>
-                    <option value="solarized-dark">Solarized Dark</option>
-                    <option value="one-dark">One Dark</option>
-                    <option value="gruvbox">Gruvbox</option>
+                    <optgroup label="深色">
+                      <option value="github-dark">GitHub Dark</option>
+                      <option value="one-dark">One Dark</option>
+                      <option value="dracula">Dracula</option>
+                      <option value="monokai">Monokai</option>
+                      <option value="nord">Nord</option>
+                      <option value="solarized-dark">Solarized Dark</option>
+                      <option value="gruvbox">Gruvbox</option>
+                      <option value="tokyo-night">Tokyo Night</option>
+                      <option value="catppuccin">Catppuccin</option>
+                      <option value="rose-pine">Rosé Pine</option>
+                    </optgroup>
+                    <optgroup label="浅色">
+                      <option value="light">Light</option>
+                    </optgroup>
                   </select>
                 </div>
                 <div className="term-toolbar-group">
@@ -2789,7 +3246,7 @@ ${historyStr.slice(-15000)}
               <div 
                 className="bottom-panels-wrapper" 
                 ref={chatPanelRef} 
-                style={{ display: 'flex', flexDirection: 'row', minHeight: 120, height: 280, borderTop: '1px solid rgba(255,255,255,0.08)', backgroundColor: 'var(--bg-primary, #0d1117)', overflow: 'hidden' }}
+                style={{ display: 'flex', flexDirection: 'row', minHeight: 120, height: 280, borderTop: '1px solid var(--bg-hover)', backgroundColor: 'var(--bg-primary, #0d1117)', overflow: 'hidden' }}
               >
                 {/* 1. File Manager Panel (Left) */}
                 {showFileManager && (
@@ -2835,15 +3292,14 @@ ${historyStr.slice(-15000)}
                     left: modelDropdownPos.left ?? 0,
                     zIndex: 9999,
                     width: 340, maxHeight: 'calc(100vh - ' + ((modelDropdownPos.top ?? 0) + 8) + 'px)', overflowY: 'auto',
-                    background: 'linear-gradient(135deg, rgba(15,15,35,0.98), rgba(20,20,45,0.98))',
-                    border: '1px solid rgba(99,102,241,0.2)',
+                    background: 'var(--bg-secondary)',
+                    border: '1px solid var(--border-primary)',
                     borderRadius: 12, padding: 0,
-                    backdropFilter: 'blur(20px)',
-                    boxShadow: '0 8px 40px rgba(0,0,0,0.5), 0 0 0 1px rgba(255,255,255,0.05) inset'
+                    boxShadow: 'var(--shadow-lg)'
                   }}>
                     {/* Header */}
                     <div style={{
-                      padding: '12px 16px 10px', borderBottom: '1px solid rgba(255,255,255,0.06)',
+                      padding: '12px 16px 10px', borderBottom: '1px solid var(--border-subtle)',
                       display: 'flex', alignItems: 'center', justifyContent: 'space-between'
                     }}>
                       <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>模型切换</span>
@@ -2896,13 +3352,13 @@ ${historyStr.slice(-15000)}
                                     }} style={{
                                       padding: '5px 10px', borderRadius: 6, border: 'none', cursor: 'pointer',
                                       fontSize: 11, fontFamily: 'var(--font-mono)',
-                                      background: isActive ? 'rgba(99,102,241,0.2)' : 'rgba(255,255,255,0.04)',
+                                      background: isActive ? 'var(--bg-active)' : 'transparent',
                                       color: isActive ? 'var(--accent)' : 'var(--text-secondary)',
                                       fontWeight: isActive ? 600 : 400,
                                       transition: 'all 0.15s ease'
                                     }}
-                                    onMouseEnter={(e) => { if (!isActive) e.currentTarget.style.background = 'rgba(255,255,255,0.08)' }}
-                                    onMouseLeave={(e) => { if (!isActive) e.currentTarget.style.background = isActive ? 'rgba(99,102,241,0.2)' : 'rgba(255,255,255,0.04)' }}
+                                    onMouseEnter={(e) => { if (!isActive) e.currentTarget.style.background = 'var(--bg-hover)' }}
+                                    onMouseLeave={(e) => { if (!isActive) e.currentTarget.style.background = isActive ? 'var(--bg-active)' : 'transparent' }}
                                     >{model}</button>
                                   )
                                 })}
@@ -2957,13 +3413,13 @@ ${historyStr.slice(-15000)}
                                 }} style={{
                                   padding: '5px 10px', borderRadius: 6, border: 'none', cursor: 'pointer',
                                   fontSize: 11, fontFamily: 'var(--font-mono)',
-                                  background: isActive ? 'rgba(99,102,241,0.2)' : 'rgba(255,255,255,0.04)',
+                                  background: isActive ? 'var(--bg-active)' : 'transparent',
                                   color: isActive ? 'var(--accent)' : 'var(--text-secondary)',
                                   fontWeight: isActive ? 600 : 400,
                                   transition: 'all 0.15s ease'
                                 }}
-                                onMouseEnter={(e) => { if (!isActive) e.currentTarget.style.background = 'rgba(255,255,255,0.08)' }}
-                                onMouseLeave={(e) => { if (!isActive) e.currentTarget.style.background = isActive ? 'rgba(99,102,241,0.2)' : 'rgba(255,255,255,0.04)' }}
+                                onMouseEnter={(e) => { if (!isActive) e.currentTarget.style.background = 'var(--bg-hover)' }}
+                                onMouseLeave={(e) => { if (!isActive) e.currentTarget.style.background = isActive ? 'var(--bg-active)' : 'transparent' }}
                                 >{model}</button>
                               )
                             })}
@@ -3003,37 +3459,50 @@ ${historyStr.slice(-15000)}
                     <button
                       className="ai-header-btn"
                       title="切换 Agent 模式"
-                      onClick={() => setShowAgentPicker(v => !v)}
-                      style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 12, padding: '3px 8px', borderRadius: 6, background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)', width: 'auto', whiteSpace: 'nowrap' }}
+                      ref={(el) => { if (el) (window as any)._agentBtnEl = el }}
+                      onClick={(e) => {
+                        const rect = e.currentTarget.getBoundingClientRect()
+                        ;(window as any)._agentBtnRect = rect
+                        setShowAgentPicker(v => !v)
+                      }}
+                      style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 12, padding: '3px 8px', borderRadius: 6, background: 'var(--bg-hover)', border: '1px solid var(--border-primary)', width: 'auto', whiteSpace: 'nowrap' }}
                     >
                       <span>{agents.find(a => a.id === activeAgentId)?.icon || '🔧'}</span>
                       <span style={{ color: agents.find(a => a.id === activeAgentId)?.color }}>{agents.find(a => a.id === activeAgentId)?.name || 'Agent'}</span>
                     </button>
-                    {showAgentPicker && (
-                      <div style={{
-                        position: 'absolute', top: '100%', right: 0, marginTop: 4, background: 'var(--bg-elevated, #1e1e2e)',
-                        border: '1px solid rgba(255,255,255,0.12)', borderRadius: 10, padding: 6, zIndex: 999,
-                        minWidth: 200, boxShadow: '0 8px 32px rgba(0,0,0,0.4)'
-                      }}>
-                        {agents.map(agent => (
-                          <button
-                            key={agent.id}
-                            onClick={() => { setActiveAgentId(agent.id); setShowAgentPicker(false) }}
-                            style={{
-                              display: 'flex', alignItems: 'center', gap: 8, width: '100%', padding: '8px 12px',
-                              background: agent.id === activeAgentId ? 'rgba(255,255,255,0.08)' : 'transparent',
-                              border: 'none', borderRadius: 8, cursor: 'pointer', color: 'var(--text-primary, #e0e0e0)',
-                              fontSize: 13, textAlign: 'left'
-                            }}
-                          >
-                            <span style={{ fontSize: 18 }}>{agent.icon}</span>
-                            <div>
-                              <div style={{ fontWeight: 500, color: agent.color }}>{agent.name}</div>
-                              <div style={{ fontSize: 11, opacity: 0.6, marginTop: 2, lineHeight: 1.3 }}>{agent.description}</div>
-                            </div>
-                          </button>
-                        ))}
-                      </div>
+                    {showAgentPicker && createPortal(
+                      <>
+                        <div style={{ position: 'fixed', inset: 0, zIndex: 9998 }} onClick={() => setShowAgentPicker(false)} />
+                        <div style={{
+                          position: 'fixed',
+                          top: ((window as any)._agentBtnRect?.bottom ?? 0) + 4,
+                          right: window.innerWidth - ((window as any)._agentBtnRect?.right ?? 0),
+                          background: 'var(--bg-secondary)',
+                          border: '1px solid var(--border-primary)',
+                          borderRadius: 10, padding: 6, zIndex: 9999,
+                          minWidth: 200, boxShadow: 'var(--shadow-lg)'
+                        }}>
+                          {agents.map(agent => (
+                            <button
+                              key={agent.id}
+                              onClick={() => { setActiveAgentId(agent.id); setShowAgentPicker(false) }}
+                              style={{
+                                display: 'flex', alignItems: 'center', gap: 8, width: '100%', padding: '8px 12px',
+                                background: agent.id === activeAgentId ? 'var(--bg-active)' : 'transparent',
+                                border: 'none', borderRadius: 8, cursor: 'pointer', color: 'var(--text-primary)',
+                                fontSize: 13, textAlign: 'left'
+                              }}
+                            >
+                              <span style={{ fontSize: 18 }}>{agent.icon}</span>
+                              <div>
+                                <div style={{ fontWeight: 500, color: agent.color }}>{agent.name}</div>
+                                <div style={{ fontSize: 11, opacity: 0.6, marginTop: 2, lineHeight: 1.3 }}>{agent.description}</div>
+                              </div>
+                            </button>
+                          ))}
+                        </div>
+                      </>,
+                      document.body
                     )}
                   </div>
                 )}
@@ -3332,7 +3801,11 @@ ${historyStr.slice(-15000)}
 
         {/* Settings — shown when no active session and page is settings */}
         {!activeSessionId && page === 'settings' && (
-          <SettingsPage settings={settings} onSave={handleSaveSettings} showToast={showToast} />
+          <SettingsPage settings={settings} onSave={handleSaveSettings} showToast={showToast} onPreview={(key, value) => {
+              if (key === 'termTheme') setTermTheme(value)
+              if (key === 'termFontSize') setTermFontSize(value)
+              if (key === 'termFontFamily') setTermFontFamily(value)
+            }} />
         )}
 
         {/* Overview — shown when no active session and page is overview */}

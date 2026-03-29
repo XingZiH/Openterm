@@ -344,7 +344,8 @@ export class AiService {
         messages: messages.map(m => ({ role: m.role, content: m.content })),
         temperature: settings.temperature ?? 0.7,
         max_tokens: settings.maxTokens ?? 4096,
-        top_p: settings.topP ?? 1
+        top_p: settings.topP ?? 1,
+        stream: false
       })
     })
 

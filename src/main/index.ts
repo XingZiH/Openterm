@@ -1,4 +1,5 @@
-import { app, BrowserWindow, ipcMain, shell, safeStorage, dialog } from 'electron'
+import { app, BrowserWindow, ipcMain, shell, safeStorage, dialog, clipboard, Menu } from 'electron'
+import { autoUpdater } from 'electron-updater'
 import { join } from 'path'
 import { readFileSync, promises as fsPromises } from 'fs'
 import { exec } from 'child_process'
@@ -102,6 +103,164 @@ ipcMain.handle('chatHistory:save', (_e, entry) => store.saveChatSession(entry))
 ipcMain.handle('chatHistory:delete', (_e, sessionKey) => store.deleteChatSession(sessionKey))
 ipcMain.handle('chatHistory:clearAll', () => store.clearAllChatHistory())
 
+// --- IPC: Clipboard ---
+ipcMain.handle('clipboard:read', () => clipboard.readText())
+ipcMain.handle('clipboard:write', (_e, text: string) => { clipboard.writeText(text) })
+
+// --- IPC: App Update (electron-updater) ---
+ipcMain.handle('app:getVersion', () => app.getVersion())
+
+// Configure autoUpdater
+autoUpdater.autoDownload = false
+autoUpdater.autoInstallOnAppQuit = true
+
+const safeUpdateSend = (data: object) => {
+  try {
+    if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents && !mainWindow.webContents.isDestroyed()) {
+      mainWindow.webContents.send('app:update-status', data)
+    }
+  } catch (_) {}
+}
+
+autoUpdater.on('checking-for-update', () => safeUpdateSend({ status: 'checking' }))
+autoUpdater.on('update-available', (info) => safeUpdateSend({ status: 'available', version: info.version, releaseNotes: info.releaseNotes }))
+autoUpdater.on('update-not-available', (info) => safeUpdateSend({ status: 'not-available', version: info.version }))
+autoUpdater.on('download-progress', (progress) => safeUpdateSend({ status: 'downloading', percent: Math.round(progress.percent), bytesPerSecond: progress.bytesPerSecond }))
+autoUpdater.on('update-downloaded', (info) => safeUpdateSend({ status: 'downloaded', version: info.version }))
+autoUpdater.on('error', (err) => safeUpdateSend({ status: 'error', error: err.message }))
+
+ipcMain.handle('app:checkUpdate', async () => {
+  try {
+    // Check via GitHub API
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), 10000)
+    const response = await fetch('https://api.github.com/repos/XingZiH/Openterm/releases/latest', { signal: controller.signal })
+    clearTimeout(timeoutId)
+    if (!response.ok) throw new Error(`网络错误: ${response.status}`)
+    const data = await response.json() as { tag_name: string; html_url: string; name: string }
+    const latestVersion = data.tag_name.replace(/^v/, '')
+    const currentVersion = app.getVersion()
+    // Skip update check in dev mode (version is '0.0.0' or 'dev')
+    const isDevMode = !app.isPackaged
+    if (isDevMode) {
+      mainWindow?.webContents.send('app:update-status', { status: 'not-available', version: currentVersion })
+      return { success: true }
+    }
+    // Compare versions properly (semver-lite)
+    const parseVer = (v: string) => v.split('.').map(n => parseInt(n) || 0)
+    const [la, lb, lc] = parseVer(latestVersion)
+    const [ca, cb, cc] = parseVer(currentVersion)
+    const hasUpdate = la > ca || (la === ca && lb > cb) || (la === ca && lb === cb && lc > cc)
+    if (!hasUpdate) {
+      mainWindow?.webContents.send('app:update-status', { status: 'not-available', version: currentVersion })
+      return { success: true }
+    }
+    // Has update: notify renderer and start auto download
+    mainWindow?.webContents.send('app:update-status', { status: 'available', version: latestVersion, currentVersion })
+    // autoUpdater handles download-progress and update-downloaded events automatically
+    autoUpdater.downloadUpdate().catch(() => {
+      // silently ignore download errors in packaged env
+    })
+    return { success: true }
+  } catch (e: any) {
+    const msg = e.name === 'AbortError' ? '网络超时，请检查网络连接' : '网络出错，请检查网络连接'
+    mainWindow?.webContents.send('app:update-status', { status: 'error', error: msg })
+    return { success: false, error: msg }
+  }
+})
+
+ipcMain.handle('app:downloadUpdate', async () => {
+  try {
+    await autoUpdater.downloadUpdate()
+    return { success: true }
+  } catch (err: any) {
+    return { success: false, error: err.message }
+  }
+})
+
+ipcMain.handle('app:installUpdate', () => {
+  autoUpdater.quitAndInstall()
+})
+
+ipcMain.handle('app:openReleasePage', () => {
+  shell.openExternal('https://github.com/XingZiH/Openterm/releases/latest')
+})
+
+// --- IPC: Config Export/Import ---
+ipcMain.handle('config:export', async () => {
+  const result = await dialog.showSaveDialog(mainWindow!, {
+    title: '导出配置',
+    defaultPath: `openterm-config-${new Date().toISOString().slice(0,10)}.json`,
+    filters: [{ name: 'JSON', extensions: ['json'] }]
+  })
+  if (result.canceled || !result.filePath) return { success: false, canceled: true }
+  const data = await store.exportAll()
+  await fsPromises.writeFile(result.filePath, JSON.stringify(data, null, 2), 'utf-8')
+  return { success: true, path: result.filePath }
+})
+ipcMain.handle('config:import', async () => {
+  const result = await dialog.showOpenDialog(mainWindow!, {
+    title: '导入配置',
+    filters: [{ name: 'JSON', extensions: ['json'] }],
+    properties: ['openFile']
+  })
+  if (result.canceled || !result.filePaths.length) return { success: false, canceled: true }
+  const raw = await fsPromises.readFile(result.filePaths[0], 'utf-8')
+  const data = JSON.parse(raw)
+  await store.importAll(data)
+  return { success: true }
+})
+
+// --- IPC: Credential Profiles ---
+ipcMain.handle('credentials:getAll', () => store.getCredentialProfiles())
+ipcMain.handle('credentials:save', (_e, profile) => store.saveCredentialProfile(profile))
+ipcMain.handle('credentials:delete', (_e, id: string) => store.deleteCredentialProfile(id))
+
+// --- IPC: AI Fetch Models ---
+ipcMain.handle('ai:fetchModels', async (_e, settings: any) => {
+  try {
+    const provider = settings.provider
+    const presets: Record<string, string[]> = {
+      anthropic: ['claude-opus-4-5', 'claude-sonnet-4-5', 'claude-haiku-3-5'],
+      deepseek: ['deepseek-chat', 'deepseek-reasoner'],
+      kimi: ['moonshot-v1-8k', 'moonshot-v1-32k', 'moonshot-v1-128k'],
+      qwen: ['qwen-plus', 'qwen-turbo', 'qwen-max'],
+      gemini: ['gemini-2.0-flash', 'gemini-2.5-pro', 'gemini-1.5-pro'],
+      xai: ['grok-3', 'grok-3-fast', 'grok-2'],
+      'custom-anthropic': ['claude-opus-4-5', 'claude-sonnet-4-5', 'claude-haiku-3-5']
+    }
+    if (presets[provider]) return { success: true, models: presets[provider] }
+    if (provider === 'ollama') {
+      const url = `${settings.ollamaUrl || 'http://localhost:11434'}/api/tags`
+      const res = await fetch(url)
+      const data = await res.json() as { models: { name: string }[] }
+      return { success: true, models: data.models.map((m: any) => m.name) }
+    }
+    // openai / custom / groq / others
+    let baseUrl = settings.apiUrl || 'https://api.openai.com/v1/chat/completions'
+    // Normalize: strip trailing /chat/completions or /completions to get base v1 URL
+    baseUrl = baseUrl
+      .replace(/\/chat\/completions$/, '')
+      .replace(/\/completions$/, '')
+      .replace(/\/$/, '')
+    // Blink uses /ai/models instead of /models
+    const isBlinkGateway = baseUrl.includes('blink.new')
+    const modelsPath = isBlinkGateway ? `${baseUrl}/ai/models` : `${baseUrl}/models`
+    const res = await fetch(modelsPath, {
+      headers: { 'Authorization': `Bearer ${settings.apiKey || ''}` }
+    })
+    if (!res.ok) {
+      const errText = await res.text()
+      return { success: false, error: `HTTP ${res.status}: ${errText.slice(0, 200)}` }
+    }
+    const data = await res.json() as { data: { id: string }[] }
+    const models = (data.data || []).map((m: any) => m.id).filter(Boolean).sort()
+    return { success: true, models }
+  } catch (err: any) {
+    return { success: false, error: err.message }
+  }
+})
+
 // --- IPC: SSH ---
 ipcMain.handle('ssh:connect', async (_e, connConfig) => {
   try {
@@ -125,17 +284,26 @@ ipcMain.on('ssh:resize', (_e, sessionId: string, cols: number, rows: number) => 
   sshManager.resize(sessionId, cols, rows)
 })
 
+// Safe send helper - avoid sending to destroyed webContents
+const safeSend = (channel: string, ...args: any[]) => {
+  try {
+    if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents && !mainWindow.webContents.isDestroyed()) {
+      mainWindow.webContents.send(channel, ...args)
+    }
+  } catch (_) {}
+}
+
 // Forward SSH data to renderer
 sshManager.on('data', (sessionId: string, data: string) => {
-  mainWindow?.webContents.send('ssh:data', sessionId, data)
+  safeSend('ssh:data', sessionId, data)
 })
 
 sshManager.on('close', (sessionId: string) => {
-  mainWindow?.webContents.send('ssh:close', sessionId)
+  safeSend('ssh:close', sessionId)
 })
 
 sshManager.on('error', (sessionId: string, error: string) => {
-  mainWindow?.webContents.send('ssh:error', sessionId, error)
+  safeSend('ssh:error', sessionId, error)
 })
 
 // --- IPC: AI ---

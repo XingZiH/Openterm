@@ -22,19 +22,6 @@ export interface ElectronAPI {
     deleteSkill: (id: string) => Promise<void>
     importSkills: (skills: any[]) => Promise<void>
   }
-  ai: {
-    testConnection: (settings: any) => Promise<{ success: boolean; error?: string }>
-    chat: (messages: any[], settings: any, options?: any) => Promise<{ success: boolean; reply?: string; error?: string }>
-    chatStream: (messages: any[], settings: any, streamId: string, options?: any) => Promise<{ success: boolean; error?: string }>
-    onStreamDelta: (callback: (streamId: string, delta: string) => void) => () => void
-    onStreamEnd: (callback: (streamId: string) => void) => () => void
-    onStreamError: (callback: (streamId: string, error: string) => void) => () => void
-    onCompacted: (callback: (streamId: string, info: any) => void) => () => void
-    getAgents: () => Promise<any[]>
-    getAgentConfig: (agentId: string) => Promise<any>
-    getTokenInfo: (messages: any[], modelName: string) => Promise<any>
-    compact: (messages: any[], settings: any) => Promise<any>
-  }
   sftp: {
     ls: (sessionId: string, remotePath: string) => Promise<{ success: boolean; data?: any[]; error?: string }>
     download: (sessionId: string, remotePath: string, localPath: string) => Promise<{ success: boolean; error?: string }>
@@ -74,6 +61,39 @@ export interface ElectronAPI {
   config: {
     getPath: () => Promise<string>
     openFile: () => Promise<{ success: boolean; path: string }>
+    export: () => Promise<{ success: boolean; canceled?: boolean; path?: string }>
+    import: () => Promise<{ success: boolean; canceled?: boolean }>
+  }
+  clipboard: {
+    read: () => Promise<string>
+    write: (text: string) => Promise<void>
+  }
+  app: {
+    checkUpdate: () => Promise<{ success: boolean; error?: string }>
+    downloadUpdate: () => Promise<{ success: boolean; error?: string }>
+    installUpdate: () => Promise<void>
+    openReleasePage: () => Promise<void>
+    getVersion: () => Promise<string>
+    onUpdateStatus: (callback: (info: any) => void) => () => void
+  }
+  credentials: {
+    getAll: () => Promise<any[]>
+    save: (profile: any) => Promise<void>
+    delete: (id: string) => Promise<void>
+  }
+  ai: {
+    testConnection: (settings: any) => Promise<{ success: boolean; error?: string }>
+    chat: (messages: any[], settings: any, options?: any) => Promise<{ success: boolean; reply?: string; error?: string }>
+    chatStream: (messages: any[], settings: any, streamId: string, options?: any) => Promise<{ success: boolean; error?: string }>
+    onStreamDelta: (callback: (streamId: string, delta: string) => void) => () => void
+    onStreamEnd: (callback: (streamId: string) => void) => () => void
+    onStreamError: (callback: (streamId: string, error: string) => void) => () => void
+    onCompacted: (callback: (streamId: string, info: any) => void) => () => void
+    getAgents: () => Promise<any[]>
+    getAgentConfig: (agentId: string) => Promise<any>
+    getTokenInfo: (messages: any[], modelName: string) => Promise<any>
+    compact: (messages: any[], settings: any) => Promise<any>
+    fetchModels: (settings: any) => Promise<string[]>
   }
 }
 
@@ -138,7 +158,8 @@ const api: ElectronAPI = {
     getAgents: () => ipcRenderer.invoke('ai:getAgents'),
     getAgentConfig: (agentId) => ipcRenderer.invoke('ai:getAgentConfig', agentId),
     getTokenInfo: (messages, modelName) => ipcRenderer.invoke('ai:getTokenInfo', messages, modelName),
-    compact: (messages, settings) => ipcRenderer.invoke('ai:compact', messages, settings)
+    compact: (messages, settings) => ipcRenderer.invoke('ai:compact', messages, settings),
+    fetchModels: (settings) => ipcRenderer.invoke('ai:fetchModels', settings)
   },
   sftp: {
     ls: (sessionId, remotePath) => ipcRenderer.invoke('sftp:ls', sessionId, remotePath),
@@ -186,7 +207,30 @@ const api: ElectronAPI = {
   },
   config: {
     getPath: () => ipcRenderer.invoke('config:getPath'),
-    openFile: () => ipcRenderer.invoke('config:openFile')
+    openFile: () => ipcRenderer.invoke('config:openFile'),
+    export: () => ipcRenderer.invoke('config:export'),
+    import: () => ipcRenderer.invoke('config:import')
+  },
+  clipboard: {
+    read: () => ipcRenderer.invoke('clipboard:read'),
+    write: (text: string) => ipcRenderer.invoke('clipboard:write', text)
+  },
+  app: {
+    checkUpdate: () => ipcRenderer.invoke('app:checkUpdate'),
+    downloadUpdate: () => ipcRenderer.invoke('app:downloadUpdate'),
+    installUpdate: () => ipcRenderer.invoke('app:installUpdate'),
+    openReleasePage: () => ipcRenderer.invoke('app:openReleasePage'),
+    getVersion: () => ipcRenderer.invoke('app:getVersion'),
+    onUpdateStatus: (callback: (info: any) => void) => {
+      const handler = (_: any, info: any) => callback(info)
+      ipcRenderer.on('app:update-status', handler)
+      return () => ipcRenderer.removeListener('app:update-status', handler)
+    }
+  },
+  credentials: {
+    getAll: () => ipcRenderer.invoke('credentials:getAll'),
+    save: (profile: any) => ipcRenderer.invoke('credentials:save', profile),
+    delete: (id: string) => ipcRenderer.invoke('credentials:delete', id)
   }
 }
 

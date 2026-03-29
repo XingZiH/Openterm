@@ -1,0 +1,46 @@
+/* Light Theme — higher specificity than :root to override dark defaults */
+html[data-theme="light"] {
+  --bg-primary: #ffffff;
+  --bg-secondary: #f6f8fa;
+  --bg-sidebar: #f0f2f5;
+  --bg-tertiary: #eaecef;
+  --bg-hover: #e5e8ec;
+  --bg-active: #d8dde6;
+  --bg-card: #f8f9fb;
+  --bg-input: #ffffff;
+  --bg-modal-overlay: rgba(0, 0, 0, 0.4);
+
+  --text-primary: #1a1f2e;
+  --text-secondary: #57606a;
+  --text-muted: #8c959f;
+  --text-accent: #0969da;
+
+  --border-primary: #d0d7de;
+  --border-subtle: #e4e8ec;
+  --border-active: #0969da;
+
+  --accent-blue: #0969da;
+  --accent-green: #1a7f37;
+  --accent-red: #cf222e;
+  --accent-orange: #9a6700;
+  --accent-purple: #8250df;
+
+  --gradient-accent: linear-gradient(135deg, #0969da 0%, #8250df 100%);
+
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.1);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.15);
+  --shadow-lg: 0 8px 30px rgba(0, 0, 0, 0.2);
+}
+
+html[data-theme="light"] body {
+  background: var(--bg-primary);
+  color: var(--text-primary);
+}
+
+html[data-theme="light"] ::-webkit-scrollbar-thumb {
+  background: var(--border-primary);
+}
+
+html[data-theme="light"] ::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+}
