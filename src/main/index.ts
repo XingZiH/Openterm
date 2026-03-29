@@ -114,24 +114,20 @@ ipcMain.handle('app:getVersion', () => app.getVersion())
 autoUpdater.autoDownload = false
 autoUpdater.autoInstallOnAppQuit = true
 
-autoUpdater.on('checking-for-update', () => {
-  mainWindow?.webContents.send('app:update-status', { status: 'checking' })
-})
-autoUpdater.on('update-available', (info) => {
-  mainWindow?.webContents.send('app:update-status', { status: 'available', version: info.version, releaseNotes: info.releaseNotes })
-})
-autoUpdater.on('update-not-available', (info) => {
-  mainWindow?.webContents.send('app:update-status', { status: 'not-available', version: info.version })
-})
-autoUpdater.on('download-progress', (progress) => {
-  mainWindow?.webContents.send('app:update-status', { status: 'downloading', percent: Math.round(progress.percent), bytesPerSecond: progress.bytesPerSecond })
-})
-autoUpdater.on('update-downloaded', (info) => {
-  mainWindow?.webContents.send('app:update-status', { status: 'downloaded', version: info.version })
-})
-autoUpdater.on('error', (err) => {
-  mainWindow?.webContents.send('app:update-status', { status: 'error', error: err.message })
-})
+const safeUpdateSend = (data: object) => {
+  try {
+    if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents && !mainWindow.webContents.isDestroyed()) {
+      mainWindow.webContents.send('app:update-status', data)
+    }
+  } catch (_) {}
+}
+
+autoUpdater.on('checking-for-update', () => safeUpdateSend({ status: 'checking' }))
+autoUpdater.on('update-available', (info) => safeUpdateSend({ status: 'available', version: info.version, releaseNotes: info.releaseNotes }))
+autoUpdater.on('update-not-available', (info) => safeUpdateSend({ status: 'not-available', version: info.version }))
+autoUpdater.on('download-progress', (progress) => safeUpdateSend({ status: 'downloading', percent: Math.round(progress.percent), bytesPerSecond: progress.bytesPerSecond }))
+autoUpdater.on('update-downloaded', (info) => safeUpdateSend({ status: 'downloaded', version: info.version }))
+autoUpdater.on('error', (err) => safeUpdateSend({ status: 'error', error: err.message }))
 
 ipcMain.handle('app:checkUpdate', async () => {
   try {
@@ -288,17 +284,26 @@ ipcMain.on('ssh:resize', (_e, sessionId: string, cols: number, rows: number) => 
   sshManager.resize(sessionId, cols, rows)
 })
 
+// Safe send helper - avoid sending to destroyed webContents
+const safeSend = (channel: string, ...args: any[]) => {
+  try {
+    if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents && !mainWindow.webContents.isDestroyed()) {
+      mainWindow.webContents.send(channel, ...args)
+    }
+  } catch (_) {}
+}
+
 // Forward SSH data to renderer
 sshManager.on('data', (sessionId: string, data: string) => {
-  mainWindow?.webContents.send('ssh:data', sessionId, data)
+  safeSend('ssh:data', sessionId, data)
 })
 
 sshManager.on('close', (sessionId: string) => {
-  mainWindow?.webContents.send('ssh:close', sessionId)
+  safeSend('ssh:close', sessionId)
 })
 
 sshManager.on('error', (sessionId: string, error: string) => {
-  mainWindow?.webContents.send('ssh:error', sessionId, error)
+  safeSend('ssh:error', sessionId, error)
 })
 
 // --- IPC: AI ---
