@@ -1,4 +1,16 @@
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, webUtils } from 'electron'
+import type { SFTPFile } from '../shared/sftp-file'
+
+export interface FileProgressEvent {
+  taskId: string
+  type: 'upload' | 'download' | 'copy' | 'delete' | 'move' | 'uploadDir'
+  fileName: string
+  status: 'started' | 'progress' | 'completed' | 'error'
+  progress: number
+  error?: string
+  totalBytes?: number
+  transferredBytes?: number
+}
 
 export interface ElectronAPI {
   ssh: {
@@ -36,9 +48,24 @@ export interface ElectronAPI {
     compact: (messages: any[], settings: any) => Promise<any>
   }
   sftp: {
-    ls: (sessionId: string, remotePath: string) => Promise<{ success: boolean; data?: any[]; error?: string }>
+    ls: (sessionId: string, remotePath: string) => Promise<{ success: boolean; data?: SFTPFile[]; error?: string }>
     download: (sessionId: string, remotePath: string, localPath: string) => Promise<{ success: boolean; error?: string }>
+    downloadDir: (sessionId: string, remotePath: string, localPath: string) => Promise<{ success: boolean; error?: string }>
     upload: (sessionId: string, localPath: string, remotePath: string) => Promise<{ success: boolean; error?: string }>
+    uploadDir: (sessionId: string, localPath: string, remotePath: string) => Promise<{ success: boolean; error?: string }>
+    isLocalDirectory: (localPath: string) => Promise<{ success: boolean; isDirectory?: boolean; error?: string }>
+    move: (sessionId: string, srcPath: string, destPath: string) => Promise<{ success: boolean; error?: string }>
+    copy: (sessionId: string, srcPath: string, destPath: string) => Promise<{ success: boolean; error?: string }>
+    delete: (sessionId: string, targetPath: string) => Promise<{ success: boolean; error?: string }>
+    rename: (sessionId: string, oldPath: string, newPath: string) => Promise<{ success: boolean; error?: string }>
+    createFile: (sessionId: string, filePath: string) => Promise<{ success: boolean; error?: string }>
+    mkdir: (sessionId: string, dirPath: string) => Promise<{ success: boolean; error?: string }>
+    readFile: (sessionId: string, filePath: string) => Promise<{ success: boolean; content?: string; size?: number; error?: string }>
+    writeFile: (sessionId: string, filePath: string, content: string) => Promise<{ success: boolean; error?: string }>
+  }
+  clipboard: {
+    readText: () => Promise<string>
+    writeText: (text: string) => Promise<void>
   }
   dialog: {
     openFile: (options: any) => Promise<{ canceled: boolean; filePaths: string[] }>
@@ -46,6 +73,7 @@ export interface ElectronAPI {
   }
   file: {
     readAsDataUrl: (filePath: string) => Promise<string | null>
+    getPathForFile: (file: File) => string | undefined
     readForAi: (sessionId: string, path: string, type: 'file' | 'dir') => Promise<{ success: boolean; output?: string; error?: string }>
   }
   chatHistory: {
@@ -62,6 +90,7 @@ export interface ElectronAPI {
     getPlatform: () => Promise<string>
     getSize: () => Promise<number[]>
     setSize: (width: number, height: number) => void
+    onBeforeClose: (callback: () => void) => () => void
   }
   pty: {
     spawn: (id: string, cwd?: string) => Promise<{ success: boolean; error?: string }>
@@ -71,9 +100,42 @@ export interface ElectronAPI {
     onData: (callback: (id: string, data: string) => void) => () => void
     onExit: (callback: (id: string, exitCode: number) => void) => () => void
   }
+  nativeMenu: {
+    openFileContextMenu: (payload: {
+      requestId: string
+      x: number
+      y: number
+      items: Array<{
+        id: string
+        label?: string
+        shortcut?: string
+        type?: 'normal' | 'separator'
+        enabled?: boolean
+        danger?: boolean
+      }>
+    }) => Promise<{ success: boolean; error?: string }>
+    hideFileContextMenu: () => void
+    onFileMenuAction: (callback: (requestId: string, actionId: string) => void) => () => void
+    onFileContextRender: (callback: (payload: {
+      requestId: string
+      items: Array<{
+        id: string
+        label: string
+        shortcut?: string
+        type: 'normal' | 'separator'
+        enabled: boolean
+        danger: boolean
+      }>
+    }) => void) => () => void
+    sendFileContextAction: (requestId: string, actionId: string) => void
+    notifyFileContextReady: () => void
+  }
   config: {
     getPath: () => Promise<string>
     openFile: () => Promise<{ success: boolean; path: string }>
+  }
+  fileProgress: {
+    onProgress: (callback: (event: FileProgressEvent) => void) => () => void
   }
 }
 
@@ -143,7 +205,22 @@ const api: ElectronAPI = {
   sftp: {
     ls: (sessionId, remotePath) => ipcRenderer.invoke('sftp:ls', sessionId, remotePath),
     download: (sessionId, remotePath, localPath) => ipcRenderer.invoke('sftp:download', sessionId, remotePath, localPath),
-    upload: (sessionId, localPath, remotePath) => ipcRenderer.invoke('sftp:upload', sessionId, localPath, remotePath)
+    downloadDir: (sessionId, remotePath, localPath) => ipcRenderer.invoke('sftp:downloadDir', sessionId, remotePath, localPath),
+    upload: (sessionId, localPath, remotePath) => ipcRenderer.invoke('sftp:upload', sessionId, localPath, remotePath),
+    uploadDir: (sessionId, localPath, remotePath) => ipcRenderer.invoke('sftp:uploadDir', sessionId, localPath, remotePath),
+    isLocalDirectory: (localPath) => ipcRenderer.invoke('sftp:isLocalDirectory', localPath),
+    move: (sessionId, srcPath, destPath) => ipcRenderer.invoke('sftp:move', sessionId, srcPath, destPath),
+    copy: (sessionId, srcPath, destPath) => ipcRenderer.invoke('sftp:copy', sessionId, srcPath, destPath),
+    delete: (sessionId, targetPath) => ipcRenderer.invoke('sftp:delete', sessionId, targetPath),
+    rename: (sessionId, oldPath, newPath) => ipcRenderer.invoke('sftp:rename', sessionId, oldPath, newPath),
+    createFile: (sessionId, filePath) => ipcRenderer.invoke('sftp:createFile', sessionId, filePath),
+    mkdir: (sessionId, dirPath) => ipcRenderer.invoke('sftp:mkdir', sessionId, dirPath),
+    readFile: (sessionId, filePath) => ipcRenderer.invoke('sftp:readFile', sessionId, filePath),
+    writeFile: (sessionId, filePath, content) => ipcRenderer.invoke('sftp:writeFile', sessionId, filePath, content)
+  },
+  clipboard: {
+    readText: () => ipcRenderer.invoke('clipboard:readText'),
+    writeText: (text) => ipcRenderer.invoke('clipboard:writeText', text)
   },
   dialog: {
     openFile: (options) => ipcRenderer.invoke('dialog:openFile', options),
@@ -151,6 +228,7 @@ const api: ElectronAPI = {
   },
   file: {
     readAsDataUrl: (filePath) => ipcRenderer.invoke('file:readAsDataUrl', filePath),
+    getPathForFile: (file) => webUtils.getPathForFile(file),
     readForAi: (sessionId, path, type) => ipcRenderer.invoke('file:readForAi', sessionId, path, type)
   },
   chatHistory: {
@@ -166,7 +244,16 @@ const api: ElectronAPI = {
     isMaximized: () => ipcRenderer.invoke('window:isMaximized'),
     getPlatform: () => ipcRenderer.invoke('window:getPlatform'),
     getSize: () => ipcRenderer.invoke('window:getSize'),
-    setSize: (width: number, height: number) => ipcRenderer.send('window:setSize', width, height)
+    setSize: (width: number, height: number) => ipcRenderer.send('window:setSize', width, height),
+    onBeforeClose: (callback) => {
+      const handler = async () => {
+        callback()
+        // 通知 main 进程 renderer 已完成清理
+        ipcRenderer.send('window:before-close-done')
+      }
+      ipcRenderer.on('window:before-close', handler)
+      return () => ipcRenderer.removeListener('window:before-close', handler)
+    }
   },
   pty: {
     spawn: (id, cwd) => ipcRenderer.invoke('pty:spawn', id, cwd),
@@ -184,9 +271,42 @@ const api: ElectronAPI = {
       return () => ipcRenderer.removeListener('pty:exit', handler)
     }
   },
+  nativeMenu: {
+    openFileContextMenu: (payload) => ipcRenderer.invoke('menu:fileContext:open', payload),
+    hideFileContextMenu: () => ipcRenderer.send('menu:fileContext:hide'),
+    onFileMenuAction: (callback) => {
+      const handler = (_: any, requestId: string, actionId: string) => callback(requestId, actionId)
+      ipcRenderer.on('menu:fileContext:action', handler)
+      return () => ipcRenderer.removeListener('menu:fileContext:action', handler)
+    },
+    onFileContextRender: (callback) => {
+      const handler = (_: any, payload: {
+        requestId: string
+        items: Array<{
+          id: string
+          label: string
+          shortcut?: string
+          type: 'normal' | 'separator'
+          enabled: boolean
+          danger: boolean
+        }>
+      }) => callback(payload)
+      ipcRenderer.on('menu:fileContext:render', handler)
+      return () => ipcRenderer.removeListener('menu:fileContext:render', handler)
+    },
+    sendFileContextAction: (requestId: string, actionId: string) => ipcRenderer.send('menu:fileContext:action', requestId, actionId),
+    notifyFileContextReady: () => ipcRenderer.send('menu:fileContext:ready')
+  },
   config: {
     getPath: () => ipcRenderer.invoke('config:getPath'),
     openFile: () => ipcRenderer.invoke('config:openFile')
+  },
+  fileProgress: {
+    onProgress: (callback) => {
+      const handler = (_: any, event: FileProgressEvent) => callback(event)
+      ipcRenderer.on('file-progress', handler)
+      return () => ipcRenderer.removeListener('file-progress', handler)
+    }
   }
 }
 

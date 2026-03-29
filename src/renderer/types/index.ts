@@ -1,3 +1,5 @@
+import type { SFTPFile } from '../../shared/sftp-file'
+
 export interface ConnectionConfig {
   id: string
   name: string
@@ -220,13 +222,17 @@ export function extractCommands(text: string): string[] {
   return commands
 }
 
-export interface SFTPFile {
-  name: string
-  type: 'd' | '-' | 'l'    // directory, file, symlink
-  size: number             // bytes
-  modifyTime: number       // timestamp in seconds or ms
-  accessTime: number
-  permissions: string      // e.g. 'drwxr-xr-x' or numeric '0755'
+export type { SFTPFile }
+
+export interface FileProgressEvent {
+  taskId: string
+  type: 'upload' | 'download' | 'copy' | 'delete' | 'move' | 'uploadDir'
+  fileName: string
+  status: 'started' | 'progress' | 'completed' | 'error'
+  progress: number
+  error?: string
+  totalBytes?: number
+  transferredBytes?: number
 }
 
 declare global {
@@ -236,6 +242,20 @@ declare global {
         ls: (sessionId: string, remotePath: string) => Promise<{ success: boolean; data?: SFTPFile[]; error?: string }>
         download: (sessionId: string, remotePath: string, localPath: string) => Promise<{ success: boolean; error?: string }>
         upload: (sessionId: string, localPath: string, remotePath: string) => Promise<{ success: boolean; error?: string }>
+        uploadDir: (sessionId: string, localPath: string, remotePath: string) => Promise<{ success: boolean; error?: string }>
+        isLocalDirectory: (localPath: string) => Promise<{ success: boolean; isDirectory?: boolean; error?: string }>
+        move: (sessionId: string, srcPath: string, destPath: string) => Promise<{ success: boolean; error?: string }>
+        copy: (sessionId: string, srcPath: string, destPath: string) => Promise<{ success: boolean; error?: string }>
+        delete: (sessionId: string, targetPath: string) => Promise<{ success: boolean; error?: string }>
+        rename: (sessionId: string, oldPath: string, newPath: string) => Promise<{ success: boolean; error?: string }>
+        createFile: (sessionId: string, filePath: string) => Promise<{ success: boolean; error?: string }>
+        mkdir: (sessionId: string, dirPath: string) => Promise<{ success: boolean; error?: string }>
+        readFile: (sessionId: string, filePath: string) => Promise<{ success: boolean; content?: string; size?: number; error?: string }>
+        writeFile: (sessionId: string, filePath: string, content: string) => Promise<{ success: boolean; error?: string }>
+      }
+      clipboard: {
+        readText: () => Promise<string>
+        writeText: (text: string) => Promise<void>
       }
       dialog: {
         selectDirectory: () => Promise<{ canceled: boolean; filePaths: string[] }>
@@ -243,6 +263,7 @@ declare global {
       }
       file: {
         readAsDataUrl: (filePath: string) => Promise<string | null>
+        getPathForFile: (file: File) => string | undefined
         readForAi: (sessionId: string, path: string, type: 'file' | 'dir') => Promise<{ success: boolean; output?: string; error?: string }>
       }
       ssh: {
@@ -302,6 +323,7 @@ declare global {
         getPlatform: () => Promise<string>
         getSize: () => Promise<number[]>
         setSize: (width: number, height: number) => void
+        onBeforeClose: (callback: () => void) => () => void
       }
       pty: {
         spawn: (id: string, cwd?: string) => Promise<{ success: boolean; error?: string }>
@@ -310,6 +332,39 @@ declare global {
         kill: (id: string) => Promise<{ success: boolean }>
         onData: (callback: (id: string, data: string) => void) => () => void
         onExit: (callback: (id: string, exitCode: number) => void) => () => void
+      }
+      nativeMenu: {
+        openFileContextMenu: (payload: {
+          requestId: string
+          x: number
+          y: number
+          items: Array<{
+            id: string
+            label?: string
+            shortcut?: string
+            type?: 'normal' | 'separator'
+            enabled?: boolean
+            danger?: boolean
+          }>
+        }) => Promise<{ success: boolean; error?: string }>
+        hideFileContextMenu: () => void
+        onFileMenuAction: (callback: (requestId: string, actionId: string) => void) => () => void
+        onFileContextRender: (callback: (payload: {
+          requestId: string
+          items: Array<{
+            id: string
+            label: string
+            shortcut?: string
+            type: 'normal' | 'separator'
+            enabled: boolean
+            danger: boolean
+          }>
+        }) => void) => () => void
+        sendFileContextAction: (requestId: string, actionId: string) => void
+        notifyFileContextReady: () => void
+      }
+      fileProgress: {
+        onProgress: (callback: (event: FileProgressEvent) => void) => () => void
       }
     }
   }
