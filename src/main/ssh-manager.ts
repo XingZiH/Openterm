@@ -194,14 +194,30 @@ export class SSHManager extends EventEmitter {
     return new Promise((resolve, reject) => {
       sftp.readdir(path, (err: Error | undefined, list: any[]) => {
         if (err) return reject(err)
-        const files: SFTPFile[] = list.map(item => ({
-          name: item.filename,
-          type: item.longname.startsWith('d') ? 'd' : item.longname.startsWith('l') ? 'l' : '-',
-          size: item.attrs.size,
-          modifyTime: item.attrs.mtime,
-          accessTime: item.attrs.atime,
-          permissions: item.longname.split(' ')[0]
-        }))
+        const files: SFTPFile[] = list.map(item => {
+          // 优先使用 attrs.mode 判断文件类型，回退到 longname 前缀解析
+          let type: 'd' | '-' | 'l' = '-'
+          const mode = item.attrs?.mode
+          if (typeof mode === 'number') {
+            const fileType = (mode >> 12) & 0o17
+            if (fileType === 0o4) type = 'd'
+            else if (fileType === 0o12) type = 'l'
+            // else 保持 '-'
+          } else {
+            // 回退到 longname 前缀解析
+            const lw = item.longname || ''
+            if (lw.startsWith('d')) type = 'd'
+            else if (lw.startsWith('l')) type = 'l'
+          }
+          return {
+            name: item.filename,
+            type,
+            size: item.attrs?.size ?? 0,
+            modifyTime: item.attrs?.mtime ?? 0,
+            accessTime: item.attrs?.atime ?? 0,
+            permissions: (item.longname || '').split(' ')[0] || '-'
+          }
+        })
         resolve(sortSftpFiles(files))
       })
     })

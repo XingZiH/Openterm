@@ -1068,7 +1068,8 @@ export default function App() {
   const [editingFile, setEditingFile] = useState<{ sessionId: string; filePath: string; fileName: string } | null>(null)
   const fileManagerPanelRef = useRef<FileManagerPanelHandle | null>(null)
   // File clipboard state for copy/cut operations
-  const [fileClipboard, setFileClipboard] = useState<{ paths: string[]; mode: 'copy' | 'cut'; sessionId: string } | null>(null)
+  // items 携带每个文件的路径和类型信息，避免粘贴时丢失文件/目录区分
+  const [fileClipboard, setFileClipboard] = useState<{ items: { path: string; type: 'd' | '-' | 'l' }[]; mode: 'copy' | 'cut'; sessionId: string } | null>(null)
   const [fmSelectedFile, setFmSelectedFile] = useState<SFTPFile | null>(null)
   const [fmSelectedFiles, setFmSelectedFiles] = useState<SFTPFile[]>([])
   const [fmCurrentPath, setFmCurrentPath] = useState<string>('/')
@@ -1548,15 +1549,21 @@ export default function App() {
       copyFile: () => {
         const filesToCopy = fmSelectedFiles.length > 0 ? fmSelectedFiles : (fmSelectedFile ? [fmSelectedFile] : [])
         if (filesToCopy.length === 0 || !activeSessionId) return
-        const paths = filesToCopy.map(f => fmCurrentPath.endsWith('/') ? `${fmCurrentPath}${f.name}` : `${fmCurrentPath}/${f.name}`)
-        setFileClipboard({ paths, mode: 'copy', sessionId: activeSessionId })
+        const items = filesToCopy.map(f => ({
+          path: fmCurrentPath.endsWith('/') ? `${fmCurrentPath}${f.name}` : `${fmCurrentPath}/${f.name}`,
+          type: f.type
+        }))
+        setFileClipboard({ items, mode: 'copy', sessionId: activeSessionId })
         showToast(`已复制 ${filesToCopy.length} 个文件`, 'success')
       },
       cutFile: () => {
         const filesToCut = fmSelectedFiles.length > 0 ? fmSelectedFiles : (fmSelectedFile ? [fmSelectedFile] : [])
         if (filesToCut.length === 0 || !activeSessionId) return
-        const paths = filesToCut.map(f => fmCurrentPath.endsWith('/') ? `${fmCurrentPath}${f.name}` : `${fmCurrentPath}/${f.name}`)
-        setFileClipboard({ paths, mode: 'cut', sessionId: activeSessionId })
+        const items = filesToCut.map(f => ({
+          path: fmCurrentPath.endsWith('/') ? `${fmCurrentPath}${f.name}` : `${fmCurrentPath}/${f.name}`,
+          type: f.type
+        }))
+        setFileClipboard({ items, mode: 'cut', sessionId: activeSessionId })
         showToast(`已剪切 ${filesToCut.length} 个文件`, 'success')
       },
       pasteFile: async (targetDir: string) => {
@@ -1567,11 +1574,21 @@ export default function App() {
         }
 
         let failCount = 0
-        for (const srcPath of fileClipboard.paths) {
-          const fileName = srcPath.split('/').pop() || ''
-          const destPath = targetDir.endsWith('/') ? `${targetDir}${fileName}` : `${targetDir}/${fileName}`
+        for (const item of fileClipboard.items) {
+          const srcPath = item.path
+          const fileName = srcPath.split(/[/\\]/).pop() || ''
+          // 兼容 Windows 本地路径的分隔符
+          const sep = targetDir.includes('\\') ? '\\' : '/'
+          const destPath = targetDir.endsWith(sep) || targetDir.endsWith('/') ? `${targetDir}${fileName}` : `${targetDir}${sep}${fileName}`
 
-          if (srcPath === destPath) { failCount++; continue }
+          // 规范化路径比较，防止 ./ 或尾随分隔符导致的误判
+          const normalize = (p: string) => {
+            const unified = p.replace(/\\/g, '/').replace(/\/\.\//g, '/').replace(/\/+/g, '/')
+            return unified.replace(/\/+$/, '')
+          }
+          const normalizedSrc = normalize(srcPath)
+          const normalizedDest = normalize(destPath)
+          if (normalizedSrc === normalizedDest) { failCount++; continue }
 
           try {
             const op = fileClipboard.mode === 'copy'
@@ -1582,10 +1599,11 @@ export default function App() {
           } catch { failCount++ }
         }
 
+        const total = fileClipboard.items.length
         if (failCount === 0) {
-          showToast(`粘贴成功 ${fileClipboard.paths.length} 个文件`, 'success')
-        } else if (failCount < fileClipboard.paths.length) {
-          showToast(`粘贴完成: ${fileClipboard.paths.length - failCount} 成功, ${failCount} 失败`, 'error')
+          showToast(`粘贴成功 ${total} 个文件`, 'success')
+        } else if (failCount < total) {
+          showToast(`粘贴完成: ${total - failCount} 成功, ${failCount} 失败`, 'error')
         } else {
           showToast(`粘贴失败`, 'error')
         }
@@ -1781,16 +1799,22 @@ export default function App() {
         if (!activeSessionId) return
         const filesToCopy = fmSelectedFiles.length > 0 ? fmSelectedFiles : (ctx.file ? [ctx.file] : [])
         if (filesToCopy.length === 0) return
-        const paths = filesToCopy.map(f => ctx.currentPath.endsWith('/') ? `${ctx.currentPath}${f.name}` : `${ctx.currentPath}/${f.name}`)
-        setFileClipboard({ paths, mode: 'copy', sessionId: activeSessionId })
+        const items = filesToCopy.map(f => ({
+          path: ctx.currentPath.endsWith('/') ? `${ctx.currentPath}${f.name}` : `${ctx.currentPath}/${f.name}`,
+          type: f.type
+        }))
+        setFileClipboard({ items, mode: 'copy', sessionId: activeSessionId })
         showToast(`已复制 ${filesToCopy.length} 个文件`, 'success')
       },
       onCutFile: () => {
         if (!activeSessionId) return
         const filesToCut = fmSelectedFiles.length > 0 ? fmSelectedFiles : (ctx.file ? [ctx.file] : [])
         if (filesToCut.length === 0) return
-        const paths = filesToCut.map(f => ctx.currentPath.endsWith('/') ? `${ctx.currentPath}${f.name}` : `${ctx.currentPath}/${f.name}`)
-        setFileClipboard({ paths, mode: 'cut', sessionId: activeSessionId })
+        const items = filesToCut.map(f => ({
+          path: ctx.currentPath.endsWith('/') ? `${ctx.currentPath}${f.name}` : `${ctx.currentPath}/${f.name}`,
+          type: f.type
+        }))
+        setFileClipboard({ items, mode: 'cut', sessionId: activeSessionId })
         showToast(`已剪切 ${filesToCut.length} 个文件`, 'success')
       },
       onPasteFile: () => fileOps.pasteFile(ctx.currentPath),
@@ -3432,7 +3456,7 @@ ${historyStr.slice(-15000)}
                         if (state.selectedFile !== undefined) setFmSelectedFile(state.selectedFile ?? null)
                         if (state.selectedFiles !== undefined) setFmSelectedFiles(state.selectedFiles)
                       }}
-                      cutFilePaths={fileClipboard?.mode === 'cut' && fileClipboard.sessionId === activeSessionId ? fileClipboard.paths : null}
+                      cutFilePaths={fileClipboard?.mode === 'cut' && fileClipboard.sessionId === activeSessionId ? fileClipboard.items.map(i => i.path) : null}
                       onEditFile={(filePath, fileName) => {
                         setEditingFile({ sessionId: activeSessionId, filePath, fileName })
                       }}

@@ -108,24 +108,37 @@ function extractFileName(filePath: string): string {
 }
 
 // Generate a unique local path by appending (1), (2), ... if the file already exists
-async function getUniqueLocalPath(targetPath: string): Promise<string> {
-  try {
-    await fsPromises.access(targetPath)
-  } catch {
-    return targetPath
+// expectedType: 'file' 时若已存在同名目录也视为冲突，'directory' 时若已存在同名文件也视为冲突
+async function getUniqueLocalPath(targetPath: string, expectedType?: 'file' | 'directory'): Promise<string> {
+  const getPathKind = async (p: string): Promise<'missing' | 'file' | 'directory' | 'other'> => {
+    try {
+      const stat = await fsPromises.stat(p)
+      if (stat.isDirectory()) return 'directory'
+      if (stat.isFile()) return 'file'
+      return 'other'
+    } catch {
+      return 'missing'
+    }
   }
+
+  const isConflict = async (p: string): Promise<boolean> => {
+    const kind = await getPathKind(p)
+    if (kind === 'missing') return false
+    return true
+  }
+
+  if (!(await isConflict(targetPath))) return targetPath
+
   const dir = dirname(targetPath)
-  const ext = extname(targetPath)
-  const base = basename(targetPath, ext)
+  const isDirectoryTarget = expectedType === 'directory'
+  const ext = isDirectoryTarget ? '' : extname(targetPath)
+  const base = isDirectoryTarget ? basename(targetPath) : basename(targetPath, ext)
+
   let counter = 1
   while (true) {
     const candidate = join(dir, `${base} (${counter})${ext}`)
-    try {
-      await fsPromises.access(candidate)
-      counter++
-    } catch {
-      return candidate
-    }
+    if (!(await isConflict(candidate))) return candidate
+    counter++
   }
 }
 
@@ -593,7 +606,7 @@ ipcMain.handle('sftp:ls', async (_e, sessionId: string, path: string) => {
 })
 
 ipcMain.handle('sftp:download', async (_e, sessionId: string, remotePath: string, localPath: string) => {
-  const uniquePath = await getUniqueLocalPath(localPath)
+  const uniquePath = await getUniqueLocalPath(localPath, 'file')
   const taskId = randomUUID()
   const fileName = extractFileName(remotePath)
   sendFileProgressThrottled({ taskId, type: 'download', fileName, status: 'started', progress: 0 })
@@ -734,7 +747,7 @@ ipcMain.handle('sftp:downloadDir', async (_e, sessionId: string, remotePath: str
   const isLocal = sessionId.startsWith('local-')
   const DOWNLOAD_CONCURRENCY = 8
   const taskId = randomUUID()
-  const uniquePath = await getUniqueLocalPath(localPath)
+  const uniquePath = await getUniqueLocalPath(localPath, 'directory')
   const dirName = extractFileName(remotePath)
 
   try {
@@ -1098,6 +1111,9 @@ ipcMain.handle('sftp:writeFile', async (_e, sessionId: string, filePath: string,
     return { success: false, error: err.message }
   }
 })
+
+const sessionDataPath = join(app.getPath('userData'), 'sessionData')
+app.setPath('sessionData', sessionDataPath)
 
 app.whenReady().then(() => {
   createWindow()
