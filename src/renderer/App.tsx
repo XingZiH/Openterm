@@ -1094,6 +1094,8 @@ export default function App() {
 
   // Terminal refs
   const terminalRefs = useRef<Map<string, { terminal: Terminal; fitAddon: FitAddon; container: HTMLDivElement }>>(new Map())
+  const terminalWriteQueueRef = useRef<Map<string, string[]>>(new Map())
+  const terminalWriteRafRef = useRef<Map<string, number>>(new Map())
   const terminalWrapperRef = useRef<HTMLDivElement>(null)
   const chatMessagesRef = useRef<HTMLDivElement>(null)
   const resizingRef = useRef(false)
@@ -1117,6 +1119,39 @@ export default function App() {
     termFontSize, termLineHeight, termTheme, termCursorStyle,
     termCursorBlink, termFontFamily, termScrollback, termBgImage
   }
+
+  const clearTerminalWriteState = useCallback((sessionId: string) => {
+    const rafId = terminalWriteRafRef.current.get(sessionId)
+    if (rafId != null) {
+      cancelAnimationFrame(rafId)
+      terminalWriteRafRef.current.delete(sessionId)
+    }
+    terminalWriteQueueRef.current.delete(sessionId)
+  }, [])
+
+  const enqueueTerminalWrite = useCallback((sessionId: string, data: string) => {
+    const queue = terminalWriteQueueRef.current.get(sessionId)
+    if (queue) {
+      queue.push(data)
+    } else {
+      terminalWriteQueueRef.current.set(sessionId, [data])
+    }
+
+    if (terminalWriteRafRef.current.has(sessionId)) return
+
+    const rafId = requestAnimationFrame(() => {
+      terminalWriteRafRef.current.delete(sessionId)
+      const chunks = terminalWriteQueueRef.current.get(sessionId)
+      if (!chunks || chunks.length === 0) return
+      terminalWriteQueueRef.current.delete(sessionId)
+
+      const ref = terminalRefs.current.get(sessionId)
+      if (!ref) return
+      ref.terminal.write(chunks.join(''))
+    })
+
+    terminalWriteRafRef.current.set(sessionId, rafId)
+  }, [])
 
   // Load data
   useEffect(() => {
@@ -1310,13 +1345,11 @@ export default function App() {
     if (!window.electronAPI) return
 
     const removeData = window.electronAPI.ssh.onData((sessionId, data) => {
-      const ref = terminalRefs.current.get(sessionId)
-      if (ref) {
-        ref.terminal.write(data)
-      }
+      enqueueTerminalWrite(sessionId, data)
     })
 
     const removeClose = window.electronAPI.ssh.onClose((sessionId) => {
+      clearTerminalWriteState(sessionId)
       setSessions((prev) => prev.filter((s) => s.id !== sessionId))
       // 正确 dispose 终端实例并移除 DOM 容器，防止残留渲染内容
       const termRef = terminalRefs.current.get(sessionId)
@@ -1344,20 +1377,18 @@ export default function App() {
       removeClose()
       removeError()
     }
-  }, [])
+  }, [enqueueTerminalWrite, clearTerminalWriteState])
 
   // Local PTY event listeners
   useEffect(() => {
     if (!window.electronAPI) return
 
     const removePtyData = window.electronAPI.pty.onData((id, data) => {
-      const ref = terminalRefs.current.get(id)
-      if (ref) {
-        ref.terminal.write(data)
-      }
+      enqueueTerminalWrite(id, data)
     })
 
     const removePtyExit = window.electronAPI.pty.onExit((id) => {
+      clearTerminalWriteState(id)
       setSessions((prev) => prev.filter((s) => s.id !== id))
       const termRef = terminalRefs.current.get(id)
       if (termRef) {
@@ -1376,12 +1407,15 @@ export default function App() {
       removePtyData()
       removePtyExit()
     }
-  }, [])
+  }, [enqueueTerminalWrite, clearTerminalWriteState])
 
   // 窗口关闭前清理所有终端实例，防止 canvas 渲染残留到下次启动
   useEffect(() => {
     if (!window.electronAPI?.window?.onBeforeClose) return
     const removeListener = window.electronAPI.window.onBeforeClose(() => {
+      terminalRefs.current.forEach((_ref, sessionId) => {
+        clearTerminalWriteState(sessionId)
+      })
       terminalRefs.current.forEach((ref) => {
         ref.terminal.dispose()
         if (ref.container.parentNode) {
@@ -2171,6 +2205,7 @@ export default function App() {
 
   // Disconnect
   const handleDisconnect = async (sessionId: string) => {
+    clearTerminalWriteState(sessionId)
     const session = sessions.find(s => s.id === sessionId)
     if (session?.isLocal) {
       await window.electronAPI.pty.kill(sessionId)
@@ -2213,7 +2248,9 @@ export default function App() {
   }
 
   const handleDisconnectAll = () => {
-    sessions.forEach((s) => handleDisconnect(s.id))
+    sessions.forEach((s) => {
+      handleDisconnect(s.id)
+    })
   }
 
   // Save connection
