@@ -211,11 +211,12 @@ export function isDangerousCommand(cmd: string): boolean {
 
 // 用于分割文本的正则（不带捕获组）
 // 支持的语言标识符：bash, sh, shell, zsh, powershell, pwsh, ps1, bat, cmd 及其常见大写变体
-export const CODE_BLOCK_SPLIT_REGEX = /```(?:bash|sh|shell|zsh|powershell|pwsh|ps1|bat|cmd|Bash|Shell|PowerShell)?\s*\n[\s\S]*?```/
+// 语言标记后的换行符可选，兼容 AI 模型返回 ```bashdocker images``` 这类无换行格式
+export const CODE_BLOCK_SPLIT_REGEX = /```(?:(?:bash|sh|shell|zsh|powershell|pwsh|ps1|bat|cmd|Bash|Shell|PowerShell)\s*\n?|\s*\n)[\s\S]*?```/
 
 export function extractCommands(text: string): string[] {
   // 使用 matchAll 避免手动管理 lastIndex
-  const matches = text.matchAll(/```(?:bash|sh|shell|zsh|powershell|pwsh|ps1|bat|cmd|Bash|Shell|PowerShell)?\s*\n([\s\S]*?)```/g)
+  const matches = text.matchAll(/```(?:(?:bash|sh|shell|zsh|powershell|pwsh|ps1|bat|cmd|Bash|Shell|PowerShell)\s*\n?|\s*\n)([\s\S]*?)```/g)
   const commands: string[] = []
   for (const match of matches) {
     const block = match[1].trim()
