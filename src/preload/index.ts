@@ -22,6 +22,9 @@ export interface ElectronAPI {
     onData: (callback: (sessionId: string, data: string) => void) => () => void
     onClose: (callback: (sessionId: string) => void) => () => void
     onError: (callback: (sessionId: string, error: string) => void) => () => void
+    onReconnecting: (callback: (sessionId: string, info: { attempt: number; maxAttempts: number; nextRetryIn: number }) => void) => () => void
+    onReconnected: (callback: (sessionId: string) => void) => () => void
+    onReconnectFailed: (callback: (sessionId: string, reason: string) => void) => () => void
   }
   store: {
     getConnections: () => Promise<any[]>
@@ -160,6 +163,21 @@ const api: ElectronAPI = {
       const handler = (_: any, sessionId: string, error: string) => callback(sessionId, error)
       ipcRenderer.on('ssh:error', handler)
       return () => ipcRenderer.removeListener('ssh:error', handler)
+    },
+    onReconnecting: (callback) => {
+      const handler = (_: any, sessionId: string, info: { attempt: number; maxAttempts: number; nextRetryIn: number }) => callback(sessionId, info)
+      ipcRenderer.on('ssh:reconnecting', handler)
+      return () => ipcRenderer.removeListener('ssh:reconnecting', handler)
+    },
+    onReconnected: (callback) => {
+      const handler = (_: any, sessionId: string) => callback(sessionId)
+      ipcRenderer.on('ssh:reconnected', handler)
+      return () => ipcRenderer.removeListener('ssh:reconnected', handler)
+    },
+    onReconnectFailed: (callback) => {
+      const handler = (_: any, sessionId: string, reason: string) => callback(sessionId, reason)
+      ipcRenderer.on('ssh:reconnectFailed', handler)
+      return () => ipcRenderer.removeListener('ssh:reconnectFailed', handler)
     }
   },
   store: {

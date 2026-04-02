@@ -419,6 +419,16 @@ body {
   50% { opacity: 0.5; }
 }
 
+.session-dot.reconnecting {
+  background: var(--accent-orange);
+  animation: reconnectPulse 1s ease-in-out infinite;
+}
+
+@keyframes reconnectPulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.3; transform: scale(0.7); }
+}
+
 .session-close {
   margin-left: auto;
   opacity: 0;
@@ -927,6 +937,12 @@ body {
 
 .server-status.offline {
   background: var(--text-muted);
+}
+
+.server-status.reconnecting {
+  background: var(--accent-orange);
+  box-shadow: 0 0 6px rgba(210, 153, 34, 0.4);
+  animation: reconnectPulse 1s ease-in-out infinite;
 }
 
 .server-card-name {
@@ -2777,6 +2793,11 @@ textarea.form-input {
 
 .toast.error {
   background: linear-gradient(135deg, var(--accent-red), #da3633);
+  color: #fff;
+}
+
+.toast.warning {
+  background: linear-gradient(135deg, var(--accent-orange), #e3b341);
   color: #fff;
 }
 

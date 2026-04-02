@@ -318,7 +318,7 @@ function SettingsPage({
 }: {
   settings: AppSettings
   onSave: (s: AppSettings) => void
-  showToast: (msg: string, type: 'success' | 'error') => void
+  showToast: (msg: string, type: 'success' | 'error' | 'warning') => void
 }) {
   const [form, setForm] = useState(settings)
   const [isTesting, setIsTesting] = useState(false)
@@ -1019,7 +1019,7 @@ export default function App() {
   const [modelDropdownPos, setModelDropdownPos] = useState<{top?: number; bottom?: number; left?: number}>({})
   const [showChatHistory, setShowChatHistory] = useState(false)
   const [chatHistoryList, setChatHistoryList] = useState<ChatHistoryEntry[]>([])
-  const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null)
+  const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'warning' } | null>(null)
   // Agent & Token & Streaming state
   const [agents, setAgents] = useState<AgentConfig[]>([])
   const [activeAgentId, setActiveAgentId] = useState('smart')
@@ -1362,7 +1362,7 @@ export default function App() {
         if (prev === sessionId) return null
         return prev
       })
-      showToast('连接已关闭', 'success')
+      showToast('连接已关闭', 'warning')
     })
 
     const removeError = window.electronAPI.ssh.onError((sessionId, error) => {
@@ -1372,10 +1372,43 @@ export default function App() {
       )
     })
 
+    const removeReconnecting = window.electronAPI.ssh.onReconnecting((sessionId, info) => {
+      setSessions((prev) =>
+        prev.map((s) => (s.id === sessionId ? { ...s, status: 'reconnecting' as const } : s))
+      )
+      showToast(`连接断开，正在重连... (${info.attempt}/${info.maxAttempts})`, 'warning')
+    })
+
+    const removeReconnected = window.electronAPI.ssh.onReconnected((sessionId) => {
+      setSessions((prev) =>
+        prev.map((s) => (s.id === sessionId ? { ...s, status: 'connected' as const } : s))
+      )
+      showToast('连接已恢复', 'success')
+    })
+
+    const removeReconnectFailed = window.electronAPI.ssh.onReconnectFailed((sessionId, reason) => {
+      clearTerminalWriteState(sessionId)
+      setSessions((prev) => prev.filter((s) => s.id !== sessionId))
+      const termRef = terminalRefs.current.get(sessionId)
+      if (termRef) {
+        termRef.terminal.dispose()
+        termRef.container.remove()
+        terminalRefs.current.delete(sessionId)
+      }
+      setActiveSessionId((prev) => {
+        if (prev === sessionId) return null
+        return prev
+      })
+      showToast(`重连失败: ${reason}`, 'error')
+    })
+
     return () => {
       removeData()
       removeClose()
       removeError()
+      removeReconnecting()
+      removeReconnected()
+      removeReconnectFailed()
     }
   }, [enqueueTerminalWrite, clearTerminalWriteState])
 
@@ -1434,7 +1467,7 @@ export default function App() {
     }
   }, [chatMessages, activeSessionId])
 
-  const showToast = (message: string, type: 'success' | 'error') => {
+  const showToast = (message: string, type: 'success' | 'error' | 'warning') => {
     setToast({ message, type })
     setTimeout(() => setToast(null), 3000)
   }
@@ -2175,9 +2208,9 @@ export default function App() {
   const handleConnect = async (conn: ConnectionConfig) => {
     // Prevent double-connect
     if (connectingId === conn.id) return
-    if (sessions.some((s) => s.connectionId === conn.id && (s.status === 'connected' || s.status === 'connecting'))) {
+    if (sessions.some((s) => s.connectionId === conn.id && (s.status === 'connected' || s.status === 'connecting' || s.status === 'reconnecting'))) {
       // Already connected — switch to that session
-      const existing = sessions.find((s) => s.connectionId === conn.id && s.status === 'connected')
+      const existing = sessions.find((s) => s.connectionId === conn.id && (s.status === 'connected' || s.status === 'reconnecting'))
       if (existing) setActiveSessionId(existing.id)
       return
     }
@@ -2967,7 +3000,7 @@ ${historyStr.slice(-15000)}
     return chatHistoryList.filter(h => h.sessionKey.startsWith(activeConnectionId))
   }, [chatHistoryList, activeConnectionId])
 
-  const connectedSessions = sessions.filter((s) => s.status === 'connected')
+  const connectedSessions = sessions.filter((s) => s.status === 'connected' || s.status === 'reconnecting')
 
   return (
     <div className="app-layout">
@@ -3033,7 +3066,7 @@ ${historyStr.slice(-15000)}
                   onClick={() => setActiveSessionId(session.id)}
                   title={session.name + ' — ' + session.host}
                 >
-                  <span className="session-dot" />
+                  <span className={`session-dot${session.status === 'reconnecting' ? ' reconnecting' : ''}`} />
                   {!sidebarCollapsed && (
                     <>
                       <span>{session.name}</span>
@@ -4055,7 +4088,8 @@ ${historyStr.slice(-15000)}
             <div className="server-grid">
               {connections.map((conn) => {
                 const isConnecting = connectingId === conn.id
-                const isConnected = sessions.some((s) => s.connectionId === conn.id && s.status === 'connected')
+                const isConnected = sessions.some((s) => s.connectionId === conn.id && (s.status === 'connected' || s.status === 'reconnecting'))
+                const isReconnecting = sessions.some((s) => s.connectionId === conn.id && s.status === 'reconnecting')
                 const hasBg = !!conn.bgImage
                 return (
                   <div
@@ -4069,7 +4103,7 @@ ${historyStr.slice(-15000)}
                       {isConnecting ? (
                         <div className="card-connecting-spinner" />
                       ) : (
-                        <span className={`server-status ${isConnected ? 'online' : 'offline'}`} />
+                        <span className={`server-status ${isReconnecting ? 'reconnecting' : isConnected ? 'online' : 'offline'}`} />
                       )}
                       <span className="server-card-name">{conn.name}</span>
                       {isConnecting && (

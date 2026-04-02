@@ -58,14 +58,14 @@
           "arch": ["x64"]
         }
       ],
-      "icon": "resources/icon.png"
+      "icon": "resources/icon.ico"
     },
     "nsis": {
       "oneClick": false,
       "perMachine": false,
       "allowToChangeInstallationDirectory": true,
-      "installerIcon": "resources/icon.png",
-      "uninstallerIcon": "resources/icon.png"
+      "installerIcon": "resources/icon.ico",
+      "uninstallerIcon": "resources/icon.ico"
     }
   }
 }

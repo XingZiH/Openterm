@@ -22,7 +22,7 @@ export interface Session {
   connectionId: string
   name: string
   host: string
-  status: 'connecting' | 'connected' | 'disconnected' | 'error'
+  status: 'connecting' | 'connected' | 'disconnected' | 'error' | 'reconnecting'
   isLocal?: boolean
 }
 
@@ -275,6 +275,9 @@ declare global {
         onData: (callback: (sessionId: string, data: string) => void) => () => void
         onClose: (callback: (sessionId: string) => void) => () => void
         onError: (callback: (sessionId: string, error: string) => void) => () => void
+        onReconnecting: (callback: (sessionId: string, info: { attempt: number; maxAttempts: number; nextRetryIn: number }) => void) => () => void
+        onReconnected: (callback: (sessionId: string) => void) => () => void
+        onReconnectFailed: (callback: (sessionId: string, reason: string) => void) => () => void
       }
       store: {
         getConnections: () => Promise<ConnectionConfig[]>

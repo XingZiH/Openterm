@@ -464,6 +464,24 @@ sshManager.on('error', (sessionId: string, error: string) => {
   }
 })
 
+sshManager.on('reconnecting', (sessionId: string, info: { attempt: number; maxAttempts: number; nextRetryIn: number }) => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('ssh:reconnecting', sessionId, info)
+  }
+})
+
+sshManager.on('reconnected', (sessionId: string) => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('ssh:reconnected', sessionId)
+  }
+})
+
+sshManager.on('reconnectFailed', (sessionId: string, reason: string) => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('ssh:reconnectFailed', sessionId, reason)
+  }
+})
+
 // --- IPC: AI ---
 ipcMain.handle('ai:testConnection', async (_e, settings: any) => {
   try {
