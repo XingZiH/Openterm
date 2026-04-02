@@ -1,6 +1,6 @@
 import { app, BrowserWindow, ipcMain, shell, safeStorage, dialog, clipboard, screen } from 'electron'
 import { join, dirname, basename, extname } from 'path'
-import { readFileSync, promises as fsPromises } from 'fs'
+import { promises as fsPromises } from 'fs'
 import { cp as fsCp } from 'fs/promises'
 import { exec } from 'child_process'
 import { promisify } from 'util'
@@ -901,7 +901,7 @@ ipcMain.handle('sftp:copy', async (_e, sessionId: string, srcPath: string, destP
 // --- IPC: Read file as data URL ---
 ipcMain.handle('file:readAsDataUrl', async (_e, filePath: string) => {
   try {
-    const data = readFileSync(filePath)
+    const data = await fsPromises.readFile(filePath)
     const ext = filePath.split('.').pop()?.toLowerCase() || 'png'
     const mimeMap: Record<string, string> = {
       png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg',

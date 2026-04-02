@@ -9,9 +9,26 @@ const STAT_CONCURRENCY = 64
 export const MAX_EDIT_FILE_SIZE = 5 * 1024 * 1024 // 5MB 编辑上限
 const BINARY_DETECT_BYTES = 8 * 1024 // 8KB 二进制探测窗口
 
+// 目录列表短时缓存（TTL 3秒），避免快速导航时重复 stat
+const LS_CACHE_TTL = 3000
+const lsCache = new Map<string, { data: SFTPFile[]; ts: number }>()
+
+// 使指定路径及其父目录的 ls 缓存失效
+function invalidateLsCache(filePath: string): void {
+  const dir = path.dirname(filePath)
+  lsCache.delete(dir)
+  lsCache.delete(filePath) // filePath 本身可能是目录
+}
+
 export class LocalFileManager {
   async ls(targetPath: string): Promise<SFTPFile[]> {
     const actualPath = targetPath === '.' || !targetPath ? os.homedir() : targetPath
+
+    // 短时缓存命中检查
+    const cached = lsCache.get(actualPath)
+    if (cached && Date.now() - cached.ts < LS_CACHE_TTL) {
+      return cached.data
+    }
 
     let list
     try {
@@ -53,6 +70,16 @@ export class LocalFileManager {
     const parentPath = path.dirname(actualPath)
     if (parentPath !== actualPath) {
       files.unshift(createParentDirectoryEntry())
+    }
+
+    // 存入缓存
+    lsCache.set(actualPath, { data: files, ts: Date.now() })
+    // 清理过期缓存条目（防止内存泄漏）
+    if (lsCache.size > 100) {
+      const now = Date.now()
+      for (const [key, val] of lsCache) {
+        if (now - val.ts > LS_CACHE_TTL) lsCache.delete(key)
+      }
     }
 
     return files
@@ -102,15 +129,18 @@ export class LocalFileManager {
 
   async move(srcPath: string, destPath: string): Promise<void> {
     await fs.rename(srcPath, destPath)
+    invalidateLsCache(srcPath)
+    invalidateLsCache(destPath)
   }
 
   async copy(srcPath: string, destPath: string): Promise<void> {
     const stat = await fs.stat(srcPath)
     if (stat.isDirectory()) {
       await fs.cp(srcPath, destPath, { recursive: true })
-      return
+    } else {
+      await fs.copyFile(srcPath, destPath)
     }
-    await fs.copyFile(srcPath, destPath)
+    invalidateLsCache(destPath)
   }
 
   async readFile(filePath: string): Promise<{ content: string; size: number }> {
@@ -119,9 +149,10 @@ export class LocalFileManager {
       throw new Error(`文件过大 (${(stat.size / 1024 / 1024).toFixed(1)}MB)，编辑上限为 5MB`)
     }
 
-    if (stat.size > 0) {
-      const fileHandle = await fs.open(filePath, 'r')
-      try {
+    // 合并 I/O：一次 open，先探测二进制再全量读取，避免重复打开文件
+    const fileHandle = await fs.open(filePath, 'r')
+    try {
+      if (stat.size > 0) {
         const probeSize = Math.min(stat.size, BINARY_DETECT_BYTES)
         const probeBuffer = Buffer.alloc(probeSize)
         const { bytesRead } = await fileHandle.read(probeBuffer, 0, probeSize, 0)
@@ -130,17 +161,19 @@ export class LocalFileManager {
             throw new Error('这是一个二进制文件，不支持编辑')
           }
         }
-      } finally {
-        await fileHandle.close()
       }
+      // 使用同一个 fileHandle 读取全部内容
+      const contentBuffer = Buffer.alloc(stat.size)
+      await fileHandle.read(contentBuffer, 0, stat.size, 0)
+      return { content: contentBuffer.toString('utf-8'), size: stat.size }
+    } finally {
+      await fileHandle.close()
     }
-
-    const content = await fs.readFile(filePath, 'utf-8')
-    return { content, size: stat.size }
   }
 
   async writeFile(filePath: string, content: string): Promise<void> {
     await fs.writeFile(filePath, content, 'utf-8')
+    invalidateLsCache(filePath)
   }
 
   private modeToPermissions(mode: number, isDir: boolean, isSymlink: boolean): string {

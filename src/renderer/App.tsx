@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { createPortal } from 'react-dom'
 import {
   ConnectionConfig,
@@ -32,9 +32,9 @@ import { FileProgressPanel } from './components/FileProgressPanel'
 import { playStepComplete, playStepError, playWorkflowDone, playWorkflowStart } from './utils/workflow-sounds'
 
 // ===========================
-// COMPONENT: CommandBlock
+// COMPONENT: CommandBlock (memoized)
 // ===========================
-function CommandBlock({
+const CommandBlock = React.memo(function CommandBlock({
   command,
   relaxedMode,
   onExecute,
@@ -123,12 +123,12 @@ function CommandBlock({
       )}
     </div>
   )
-}
+})
 
 // ===========================
-// COMPONENT: ChatMessageView
+// COMPONENT: ChatMessageView (memoized)
 // ===========================
-function ChatMessageView({
+const ChatMessageView = React.memo(function ChatMessageView({
   message,
   relaxedMode,
   onExecute
@@ -139,17 +139,19 @@ function ChatMessageView({
 }) {
   const isUser = message.role === 'user'
   
-  let displayContent = message.content
-  if (!isUser) {
-    // Strip XML tags used for internal reasoning
-    displayContent = displayContent.replace(/<response>([\s\S]*?)<\/response>/g, '$1').trim()
-    displayContent = displayContent.replace(/<thinking>[\s\S]*?<\/thinking>/g, '').trim()
-  }
+  const displayContent = useMemo(() => {
+    let content = message.content
+    if (!isUser) {
+      content = content.replace(/<response>([\s\S]*?)<\/response>/g, '$1').trim()
+      content = content.replace(/<thinking>[\s\S]*?<\/thinking>/g, '').trim()
+    }
+    return content
+  }, [message.content, isUser])
 
-  const commands = isUser ? [] : extractCommands(displayContent)
-  const textParts = isUser
+  const commands = useMemo(() => isUser ? [] : extractCommands(displayContent), [displayContent, isUser])
+  const textParts = useMemo(() => isUser
     ? [displayContent]
-    : displayContent.split(CODE_BLOCK_SPLIT_REGEX)
+    : displayContent.split(CODE_BLOCK_SPLIT_REGEX), [displayContent, isUser])
 
   return (
     <div className="chat-message">
@@ -183,7 +185,7 @@ function ChatMessageView({
       </div>
     </div>
   )
-}
+})
 
 // ===========================
 // COMPONENT: ConnectionForm
@@ -2170,10 +2172,12 @@ export default function App() {
   useEffect(() => {
     if (!activeSessionId || !terminalWrapperRef.current) return
 
+    let resizeTimer: ReturnType<typeof setTimeout> | null = null
     const observer = new ResizeObserver(() => {
-      const ref = terminalRefs.current.get(activeSessionId)
-      if (ref) {
-        setTimeout(() => {
+      if (resizeTimer) clearTimeout(resizeTimer)
+      resizeTimer = setTimeout(() => {
+        const ref = terminalRefs.current.get(activeSessionId)
+        if (ref) {
           ref.fitAddon.fit()
           const dims = ref.fitAddon.proposeDimensions()
           if (dims) {
@@ -2183,12 +2187,12 @@ export default function App() {
               window.electronAPI.ssh.resize(activeSessionId, dims.cols, dims.rows)
             }
           }
-        }, 50)
-      }
+        }
+      }, 150)
     })
 
     observer.observe(terminalWrapperRef.current)
-    return () => observer.disconnect()
+    return () => { observer.disconnect(); if (resizeTimer) clearTimeout(resizeTimer) }
   }, [activeSessionId])
 
   // Apply terminal settings to all instances
@@ -3968,14 +3972,30 @@ ${historyStr.slice(-15000)}
                   </div>
                 )
               })()}
-              {currentChatMessages.map((msg, i) => (
-                <ChatMessageView
-                  key={i}
-                  message={msg}
-                  relaxedMode={settings.relaxedMode}
-                  onExecute={executeCommand}
-                />
-              ))}
+              {(() => {
+                const msgs = currentChatMessages
+                const VISIBLE_WINDOW = 30
+                // 虚拟滚动：超过 VISIBLE_WINDOW 条消息时，只渲染最后 VISIBLE_WINDOW 条
+                const startIdx = msgs.length > VISIBLE_WINDOW ? msgs.length - VISIBLE_WINDOW : 0
+                const visibleMsgs = msgs.slice(startIdx)
+                return (
+                  <>
+                    {startIdx > 0 && (
+                      <div className="chat-truncated-hint" style={{ textAlign: 'center', padding: '8px', color: 'var(--text-muted)', fontSize: 12 }}>
+                        ↑ 已省略 {startIdx} 条历史消息
+                      </div>
+                    )}
+                    {visibleMsgs.map((msg, i) => (
+                      <ChatMessageView
+                        key={startIdx + i}
+                        message={msg}
+                        relaxedMode={settings.relaxedMode}
+                        onExecute={executeCommand}
+                      />
+                    ))}
+                  </>
+                )
+              })()}
               {/* Streaming content — show AI response as it arrives */}
               {aiLoading && streamingContent && (() => {
                 // In relaxed mode: if content looks like JSON workflow, show planning message

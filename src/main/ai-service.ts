@@ -44,6 +44,47 @@ export interface AiSettings {
 const MAX_RETRIES = 3
 const RETRY_BASE_DELAY = 1000 // ms
 
+// --- SSE delta 批量合并发送工具 ---
+// 将高频 delta 合并为 16ms 一次的批量 IPC 发送，减少渲染进程压力
+function createDeltaBatcher(window: import('electron').BrowserWindow, streamId: string) {
+  let buffer = ''
+  let timer: ReturnType<typeof setTimeout> | null = null
+  const BATCH_INTERVAL = 16 // ~60fps
+
+  function flush() {
+    timer = null
+    if (buffer) {
+      window.webContents.send('ai:stream:delta', streamId, buffer)
+      buffer = ''
+    }
+  }
+
+  return {
+    push(delta: string) {
+      buffer += delta
+      if (!timer) {
+        timer = setTimeout(flush, BATCH_INTERVAL)
+      }
+    },
+    end() {
+      if (timer) { clearTimeout(timer); timer = null }
+      if (buffer) {
+        window.webContents.send('ai:stream:delta', streamId, buffer)
+        buffer = ''
+      }
+      window.webContents.send('ai:stream:end', streamId)
+    },
+    error(msg: string) {
+      if (timer) { clearTimeout(timer); timer = null }
+      if (buffer) {
+        window.webContents.send('ai:stream:delta', streamId, buffer)
+        buffer = ''
+      }
+      window.webContents.send('ai:stream:error', streamId, msg)
+    }
+  }
+}
+
 export class AiService {
   private agentManager: AgentManager
 
@@ -240,8 +281,9 @@ export class AiService {
         return await this.rawChat(messages, settings)
       } catch (err: any) {
         lastError = err
-        // 不重试非 5xx 错误
-        if (err.message?.includes('4')) break
+        // 不重试客户端错误 (4xx)
+        const statusMatch = err.message?.match(/(\d{3})/)
+        if (statusMatch && parseInt(statusMatch[1]) >= 400 && parseInt(statusMatch[1]) < 500) break
         if (attempt < MAX_RETRIES) {
           const delay = RETRY_BASE_DELAY * Math.pow(2, attempt)
           await new Promise(resolve => setTimeout(resolve, delay))
@@ -417,6 +459,7 @@ export class AiService {
     // 独立进行后台流式读取，不阻塞当前 IPC 调用返回
     ;(async () => {
       let buffer = ''
+      const batcher = createDeltaBatcher(window, streamId)
       try {
         while (true) {
           const { done, value } = await reader.read()
@@ -431,23 +474,23 @@ export class AiService {
             if (!trimmed || !trimmed.startsWith('data: ')) continue
             const data = trimmed.slice(6)
             if (data === '[DONE]') {
-              window.webContents.send('ai:stream:end', streamId)
+              batcher.end()
               return
             }
             try {
               const parsed = JSON.parse(data)
               const delta = parsed.choices?.[0]?.delta?.content
               if (delta) {
-                window.webContents.send('ai:stream:delta', streamId, delta)
+                batcher.push(delta)
               }
             } catch {
               // ignore json parse errors
             }
           }
         }
-        window.webContents.send('ai:stream:end', streamId)
+        batcher.end()
       } catch (err: any) {
-        window.webContents.send('ai:stream:error', streamId, err.message)
+        batcher.error(err.message)
       }
     })()
   }
@@ -537,6 +580,7 @@ export class AiService {
     const reader = response.body.getReader()
     const decoder = new TextDecoder()
     let buffer = ''
+    const batcher = createDeltaBatcher(window, streamId)
 
     try {
       while (true) {
@@ -553,18 +597,18 @@ export class AiService {
           try {
             const data = JSON.parse(trimmed.slice(6))
             if (data.type === 'content_block_delta' && data.delta?.text) {
-              window.webContents.send('ai:stream:delta', streamId, data.delta.text)
+              batcher.push(data.delta.text)
             }
             if (data.type === 'message_stop') {
-              window.webContents.send('ai:stream:end', streamId)
+              batcher.end()
               return
             }
           } catch { /* ignore */ }
         }
       }
-      window.webContents.send('ai:stream:end', streamId)
+      batcher.end()
     } catch (err: any) {
-      window.webContents.send('ai:stream:error', streamId, err.message)
+      batcher.error(err.message)
     }
   }
 
@@ -620,6 +664,7 @@ export class AiService {
     const reader = response.body.getReader()
     const decoder = new TextDecoder()
     let buffer = ''
+    const batcher = createDeltaBatcher(window, streamId)
 
     try {
       while (true) {
@@ -635,18 +680,18 @@ export class AiService {
           try {
             const data = JSON.parse(line)
             if (data.message?.content) {
-              window.webContents.send('ai:stream:delta', streamId, data.message.content)
+              batcher.push(data.message.content)
             }
             if (data.done) {
-              window.webContents.send('ai:stream:end', streamId)
+              batcher.end()
               return
             }
           } catch { /* ignore */ }
         }
       }
-      window.webContents.send('ai:stream:end', streamId)
+      batcher.end()
     } catch (err: any) {
-      window.webContents.send('ai:stream:error', streamId, err.message)
+      batcher.error(err.message)
     }
   }
 }

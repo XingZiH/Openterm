@@ -30,10 +30,18 @@ export default defineConfig({
     root: resolve(__dirname, 'src/renderer'),
     build: {
       outDir: resolve(__dirname, 'out/renderer'),
+      cssCodeSplit: true,
+      chunkSizeWarningLimit: 600,
       rollupOptions: {
         input: {
           index: resolve(__dirname, 'src/renderer/index.html'),
           'file-context-menu': resolve(__dirname, 'src/renderer/file-context-menu.html')
+        },
+        output: {
+          manualChunks: {
+            'vendor-react': ['react', 'react-dom'],
+            'vendor-xterm': ['@xterm/xterm', '@xterm/addon-fit']
+          }
         }
       }
     }

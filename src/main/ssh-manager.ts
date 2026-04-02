@@ -367,16 +367,16 @@ export class SSHManager extends EventEmitter {
           execStream = stream
           if (settled) { try { stream.close() } catch {}; return }
 
-          let output = ''
+          let output: Buffer[] = []
           stream.on('data', (data: Buffer) => {
-            output += data.toString('utf-8')
+            output.push(data)
           })
           stream.stderr.on('data', (data: Buffer) => {
-            output += data.toString('utf-8')
+            output.push(data)
           })
           stream.on('close', () => {
             clearTimeout(timer)
-            if (!settled) { settled = true; resolve(output) }
+            if (!settled) { settled = true; resolve(Buffer.concat(output).toString('utf-8')) }
           })
         })
       })
@@ -443,7 +443,7 @@ export class SSHManager extends EventEmitter {
   async sftpDownload(sessionId: string, remotePath: string, localPath: string, onProgress?: (transferred: number, total: number) => void): Promise<void> {
     const sftp = await this.getSftp(sessionId)
     return new Promise((resolve, reject) => {
-      const options: any = { concurrency: 64, chunkSize: 32768 }
+      const options: any = { concurrency: 64, chunkSize: 65536 }
       if (onProgress) {
         options.step = (transferred: number, _chunk: number, total: number) => {
           onProgress(transferred, total)
@@ -459,7 +459,7 @@ export class SSHManager extends EventEmitter {
   async sftpUpload(sessionId: string, localPath: string, remotePath: string, onProgress?: (transferred: number, total: number) => void): Promise<void> {
     const sftp = await this.getSftp(sessionId)
     return new Promise((resolve, reject) => {
-      const options: any = { concurrency: 64, chunkSize: 32768 }
+      const options: any = { concurrency: 64, chunkSize: 65536 }
       if (onProgress) {
         options.step = (transferred: number, _chunk: number, total: number) => {
           onProgress(transferred, total)
