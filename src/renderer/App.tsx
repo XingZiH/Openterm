@@ -14,7 +14,8 @@ import {
   AgentSkill,
   extractCommands,
   isDangerousCommand,
-  SFTPFile
+  SFTPFile,
+  CODE_BLOCK_SPLIT_REGEX
 } from './types'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
@@ -131,7 +132,7 @@ function ChatMessageView({
   const commands = isUser ? [] : extractCommands(displayContent)
   const textParts = isUser
     ? [displayContent]
-    : displayContent.split(/```(?:bash|sh|shell|zsh|powershell|ps1|bat|cmd)?\w*\s*\n[\s\S]*?```/)
+    : displayContent.split(CODE_BLOCK_SPLIT_REGEX)
 
   return (
     <div className="chat-message">

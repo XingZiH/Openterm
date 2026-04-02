@@ -16,6 +16,7 @@ interface FileTask {
 const TYPE_LABELS: Record<FileTask['type'], string> = {
   upload: '上传',
   download: '下载',
+  downloadDir: '下载文件夹',
   copy: '复制',
   move: '移动',
   delete: '删除',
@@ -25,6 +26,7 @@ const TYPE_LABELS: Record<FileTask['type'], string> = {
 const TYPE_ICONS: Record<FileTask['type'], string> = {
   upload: '\u2B06',
   download: '\u2B07',
+  downloadDir: '\uD83D\uDCC2',
   copy: '\u2398',
   move: '\u21C4',
   delete: '\u2716',

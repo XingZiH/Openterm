@@ -39,6 +39,7 @@ function isRecoverableError(err: Error): boolean {
 const MAX_RECONNECT_ATTEMPTS = 5
 const MAX_RECONNECT_DELAY_MS = 30000
 const MAX_SESSIONS = 20
+const EXEC_TIMEOUT_MS = 30000  // exec 单命令超时，防止断连后 Promise 永不 resolve
 
 export interface SSHConnectionConfig {
   id: string
@@ -145,6 +146,8 @@ export class SSHManager extends EventEmitter {
     if (session.reconnectTimer) clearTimeout(session.reconnectTimer)
     session.isReconnecting = false
     this.sessions.delete(sessionId)
+    try { session.stream?.removeAllListeners() } catch {}
+    try { session.client.removeAllListeners() } catch {}
     try { session.sftp?.end() } catch {}
     try { session.stream?.close() } catch {}
     try { session.client.end() } catch {}
@@ -199,7 +202,9 @@ export class SSHManager extends EventEmitter {
           })
         })
 
-        // 3. 清理旧连接资源
+        // 3. 清理旧连接资源（先移除事件监听器，防止 end() 触发的残余事件引起多余重连）
+        try { session.client.removeAllListeners() } catch {}
+        try { session.stream?.removeAllListeners() } catch {}
         try { session.client.end() } catch {}
 
         // 4. 更新 session，重置重连状态
@@ -340,8 +345,14 @@ export class SSHManager extends EventEmitter {
       await previousMutex // Wait for previous to finish
 
       return await new Promise((resolve, reject) => {
+        // 超时保护：防止断连后 client.exec 回调永不触发导致 mutex 死锁
+        const timer = setTimeout(() => {
+          reject(new Error('命令执行超时'))
+        }, EXEC_TIMEOUT_MS)
+
         session.client.exec(command, (err, stream) => {
           if (err) {
+            clearTimeout(timer)
             reject(err)
             return
           }
@@ -353,6 +364,7 @@ export class SSHManager extends EventEmitter {
             output += data.toString('utf-8')
           })
           stream.on('close', () => {
+            clearTimeout(timer)
             resolve(output)
           })
         })

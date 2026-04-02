@@ -209,11 +209,15 @@ export function isDangerousCommand(cmd: string): boolean {
   return DANGEROUS_PATTERNS.some((pattern) => pattern.test(cmd))
 }
 
+// 用于分割文本的正则（不带捕获组）
+// 支持的语言标识符：bash, sh, shell, zsh, powershell, pwsh, ps1, bat, cmd 及其常见大写变体
+export const CODE_BLOCK_SPLIT_REGEX = /```(?:bash|sh|shell|zsh|powershell|pwsh|ps1|bat|cmd|Bash|Shell|PowerShell)?\s*\n[\s\S]*?```/
+
 export function extractCommands(text: string): string[] {
-  const codeBlockRegex = /```(?:bash|sh|shell|zsh|powershell|ps1|bat|cmd)?\w*\s*\n([\s\S]*?)```/g
+  // 使用 matchAll 避免手动管理 lastIndex
+  const matches = text.matchAll(/```(?:bash|sh|shell|zsh|powershell|pwsh|ps1|bat|cmd|Bash|Shell|PowerShell)?\s*\n([\s\S]*?)```/g)
   const commands: string[] = []
-  let match: RegExpExecArray | null
-  while ((match = codeBlockRegex.exec(text)) !== null) {
+  for (const match of matches) {
     const block = match[1].trim()
     if (block) {
       commands.push(block)
@@ -226,7 +230,7 @@ export type { SFTPFile }
 
 export interface FileProgressEvent {
   taskId: string
-  type: 'upload' | 'download' | 'copy' | 'delete' | 'move' | 'uploadDir'
+  type: 'upload' | 'download' | 'downloadDir' | 'copy' | 'delete' | 'move' | 'uploadDir'
   fileName: string
   status: 'started' | 'progress' | 'completed' | 'error'
   progress: number
@@ -241,6 +245,7 @@ declare global {
       sftp: {
         ls: (sessionId: string, remotePath: string) => Promise<{ success: boolean; data?: SFTPFile[]; error?: string }>
         download: (sessionId: string, remotePath: string, localPath: string) => Promise<{ success: boolean; error?: string }>
+        downloadDir: (sessionId: string, remotePath: string, localPath: string) => Promise<{ success: boolean; error?: string }>
         upload: (sessionId: string, localPath: string, remotePath: string) => Promise<{ success: boolean; error?: string }>
         uploadDir: (sessionId: string, localPath: string, remotePath: string) => Promise<{ success: boolean; error?: string }>
         isLocalDirectory: (localPath: string) => Promise<{ success: boolean; isDirectory?: boolean; error?: string }>

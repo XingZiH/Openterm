@@ -3,7 +3,7 @@ import type { SFTPFile } from '../shared/sftp-file'
 
 export interface FileProgressEvent {
   taskId: string
-  type: 'upload' | 'download' | 'copy' | 'delete' | 'move' | 'uploadDir'
+  type: 'upload' | 'download' | 'downloadDir' | 'copy' | 'delete' | 'move' | 'uploadDir'
   fileName: string
   status: 'started' | 'progress' | 'completed' | 'error'
   progress: number
