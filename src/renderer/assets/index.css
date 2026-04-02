@@ -4172,22 +4172,28 @@ textarea.form-input {
 .fm-content {
   flex: 1;
   overflow-y: auto;
+  overflow-x: auto;
   position: relative;
 }
 
 .fm-content::-webkit-scrollbar {
   width: 8px;
+  height: 8px;
 }
 .fm-content::-webkit-scrollbar-thumb {
-  background: rgba(255,255,255,0.1);
+  background: rgba(255,255,255,0.18);
   border-radius: 4px;
 }
 .fm-content::-webkit-scrollbar-thumb:hover {
-  background: rgba(255,255,255,0.2);
+  background: rgba(255,255,255,0.32);
+}
+.fm-content::-webkit-scrollbar-corner {
+  background: transparent;
 }
 
 .fm-table {
-  width: 100%;
+  min-width: 100%;
+  width: max-content;
   border-collapse: collapse;
   text-align: left;
 }
@@ -4259,8 +4265,6 @@ textarea.form-input {
 
 .fm-filename {
   color: var(--text-primary);
-  text-overflow: ellipsis;
-  overflow: hidden;
 }
 
 .td-size, .th-size { text-align: right; width: 100px; color: var(--text-secondary); }
