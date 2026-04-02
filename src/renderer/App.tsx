@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { createPortal } from 'react-dom'
 import {
   ConnectionConfig,
@@ -13,7 +13,9 @@ import {
   WorkflowNode,
   AgentSkill,
   extractCommands,
-  isDangerousCommand
+  isDangerousCommand,
+  SFTPFile,
+  CODE_BLOCK_SPLIT_REGEX
 } from './types'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
@@ -23,13 +25,16 @@ import { AgentResultPanel } from './components/AgentResultPanel'
 import { WorkflowPanel } from './components/WorkflowPanel'
 import { SkillEditorModal } from './components/SkillEditorModal'
 import { SkillManagerModal } from './components/SkillManagerModal'
-import { FileManagerPanel } from './components/FileManagerPanel'
+import { FileManagerPanel, FileManagerPanelHandle } from './components/FileManagerPanel'
+import { FileEditorPanel } from './components/FileEditorPanel'
+import { ContextMenu, ContextMenuState, INITIAL_CONTEXT_MENU_STATE, buildTerminalMenuItems, buildFileMenuItems } from './components/ContextMenu'
+import { FileProgressPanel } from './components/FileProgressPanel'
 import { playStepComplete, playStepError, playWorkflowDone, playWorkflowStart } from './utils/workflow-sounds'
 
 // ===========================
-// COMPONENT: CommandBlock
+// COMPONENT: CommandBlock (memoized)
 // ===========================
-function CommandBlock({
+const CommandBlock = React.memo(function CommandBlock({
   command,
   relaxedMode,
   onExecute,
@@ -42,6 +47,7 @@ function CommandBlock({
 }) {
   const [executed, setExecuted] = useState(autoExecuted || false)
   const [expanded, setExpanded] = useState(false)
+  const [rerunConfirm, setRerunConfirm] = useState(false)
   const dangerous = isDangerousCommand(command)
 
   const lines = command.split('\n')
@@ -49,6 +55,17 @@ function CommandBlock({
 
   const handleExecute = () => {
     if (executed) return
+    onExecute(command)
+    setExecuted(true)
+  }
+
+  const handleRerun = () => {
+    if (dangerous && !rerunConfirm) {
+      setRerunConfirm(true)
+      setTimeout(() => setRerunConfirm(false), 3000)
+      return
+    }
+    setRerunConfirm(false)
     onExecute(command)
     setExecuted(true)
   }
@@ -66,7 +83,12 @@ function CommandBlock({
         )}
         <div className="command-block-actions">
           {executed ? (
-            <span className="execute-btn executed">✓ 已执行</span>
+            <>
+              <span className="execute-btn executed">✓ 已执行</span>
+              <button className={`execute-btn rerun${rerunConfirm ? ' rerun-confirm' : ''}`} onClick={handleRerun} title={rerunConfirm ? '再次点击确认执行' : '重新执行'}>
+                {rerunConfirm ? '⚠ 确认?' : '↻'}
+              </button>
+            </>
           ) : (
             <button
               className={`execute-btn ${dangerous ? 'danger' : 'primary'}`}
@@ -101,12 +123,12 @@ function CommandBlock({
       )}
     </div>
   )
-}
+})
 
 // ===========================
-// COMPONENT: ChatMessageView
+// COMPONENT: ChatMessageView (memoized)
 // ===========================
-function ChatMessageView({
+const ChatMessageView = React.memo(function ChatMessageView({
   message,
   relaxedMode,
   onExecute
@@ -117,17 +139,19 @@ function ChatMessageView({
 }) {
   const isUser = message.role === 'user'
   
-  let displayContent = message.content
-  if (!isUser) {
-    // Strip XML tags used for internal reasoning
-    displayContent = displayContent.replace(/<response>([\s\S]*?)<\/response>/g, '$1').trim()
-    displayContent = displayContent.replace(/<thinking>[\s\S]*?<\/thinking>/g, '').trim()
-  }
+  const displayContent = useMemo(() => {
+    let content = message.content
+    if (!isUser) {
+      content = content.replace(/<response>([\s\S]*?)<\/response>/g, '$1').trim()
+      content = content.replace(/<thinking>[\s\S]*?<\/thinking>/g, '').trim()
+    }
+    return content
+  }, [message.content, isUser])
 
-  const commands = isUser ? [] : extractCommands(displayContent)
-  const textParts = isUser
+  const commands = useMemo(() => isUser ? [] : extractCommands(displayContent), [displayContent, isUser])
+  const textParts = useMemo(() => isUser
     ? [displayContent]
-    : displayContent.split(/```(?:bash|sh|shell|zsh|powershell|ps1|bat|cmd)?\w*\s*\n[\s\S]*?```/)
+    : displayContent.split(CODE_BLOCK_SPLIT_REGEX), [displayContent, isUser])
 
   return (
     <div className="chat-message">
@@ -161,7 +185,7 @@ function ChatMessageView({
       </div>
     </div>
   )
-}
+})
 
 // ===========================
 // COMPONENT: ConnectionForm
@@ -314,7 +338,7 @@ function SettingsPage({
 }: {
   settings: AppSettings
   onSave: (s: AppSettings) => void
-  showToast: (msg: string, type: 'success' | 'error') => void
+  showToast: (msg: string, type: 'success' | 'error' | 'warning') => void
 }) {
   const [form, setForm] = useState(settings)
   const [isTesting, setIsTesting] = useState(false)
@@ -384,7 +408,8 @@ function SettingsPage({
             <option value="dracula">Dracula</option>
             <option value="monokai">Monokai</option>
             <option value="nord">Nord</option>
-            <option value="solarized">Solarized Dark</option>
+            <option value="solarized-dark">Solarized Dark</option>
+            <option value="one-dark">One Dark</option>
             <option value="gruvbox">Gruvbox</option>
           </select>
         </div>
@@ -1014,7 +1039,7 @@ export default function App() {
   const [modelDropdownPos, setModelDropdownPos] = useState<{top?: number; bottom?: number; left?: number}>({})
   const [showChatHistory, setShowChatHistory] = useState(false)
   const [chatHistoryList, setChatHistoryList] = useState<ChatHistoryEntry[]>([])
-  const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null)
+  const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'warning' } | null>(null)
   // Agent & Token & Streaming state
   const [agents, setAgents] = useState<AgentConfig[]>([])
   const [activeAgentId, setActiveAgentId] = useState('smart')
@@ -1039,6 +1064,36 @@ export default function App() {
   const [showSaveSkillModal, setShowSaveSkillModal] = useState<{ isOpen: boolean; draftSkill?: Partial<AgentSkill> }>({ isOpen: false })
   const [showFileManager, setShowFileManager] = useState(false)
   const [showAiPanel, setShowAiPanel] = useState(true)
+  // Context menu state
+  const [contextMenu, setContextMenu] = useState<ContextMenuState>(INITIAL_CONTEXT_MENU_STATE)
+  // Prompt modal state (replaces window.prompt which is blocked in Electron)
+  const [promptModal, setPromptModal] = useState<{
+    visible: boolean
+    title: string
+    placeholder?: string
+    onConfirm: (value: string) => void
+  }>({ visible: false, title: '', onConfirm: () => {} })
+  const [confirmModal, setConfirmModal] = useState<{
+    visible: boolean
+    title: string
+    message: string
+    confirmText?: string
+    cancelText?: string
+    onConfirm: () => void
+  }>({ visible: false, title: '', message: '', onConfirm: () => {} })
+  const [promptValue, setPromptValue] = useState('')
+  const promptInputRef = useRef<HTMLInputElement>(null)
+  const fileMenuActionStateRef = useRef<{ requestId: string; actions: Record<string, () => void> }>({ requestId: '', actions: {} })
+  // File editor state
+  const [editingFile, setEditingFile] = useState<{ sessionId: string; filePath: string; fileName: string } | null>(null)
+  const fileManagerPanelRef = useRef<FileManagerPanelHandle | null>(null)
+  // File clipboard state for copy/cut operations
+  // items 携带每个文件的路径和类型信息，避免粘贴时丢失文件/目录区分
+  const [fileClipboard, setFileClipboard] = useState<{ items: { path: string; type: 'd' | '-' | 'l' }[]; mode: 'copy' | 'cut'; sessionId: string } | null>(null)
+  const [fmSelectedFile, setFmSelectedFile] = useState<SFTPFile | null>(null)
+  const [fmSelectedFiles, setFmSelectedFiles] = useState<SFTPFile[]>([])
+  const [fmCurrentPath, setFmCurrentPath] = useState<string>('/')
+  const [fmReloadToken, setFmReloadToken] = useState(0)
   // Workflow state
   const [activeWorkflow, setActiveWorkflow] = useState<Workflow | null>(null)
   const [termFontSize, setTermFontSize] = useState(13)
@@ -1059,6 +1114,8 @@ export default function App() {
 
   // Terminal refs
   const terminalRefs = useRef<Map<string, { terminal: Terminal; fitAddon: FitAddon; container: HTMLDivElement }>>(new Map())
+  const terminalWriteQueueRef = useRef<Map<string, string[]>>(new Map())
+  const terminalWriteRafRef = useRef<Map<string, number>>(new Map())
   const terminalWrapperRef = useRef<HTMLDivElement>(null)
   const chatMessagesRef = useRef<HTMLDivElement>(null)
   const resizingRef = useRef(false)
@@ -1083,6 +1140,39 @@ export default function App() {
     termCursorBlink, termFontFamily, termScrollback, termBgImage
   }
 
+  const clearTerminalWriteState = useCallback((sessionId: string) => {
+    const rafId = terminalWriteRafRef.current.get(sessionId)
+    if (rafId != null) {
+      cancelAnimationFrame(rafId)
+      terminalWriteRafRef.current.delete(sessionId)
+    }
+    terminalWriteQueueRef.current.delete(sessionId)
+  }, [])
+
+  const enqueueTerminalWrite = useCallback((sessionId: string, data: string) => {
+    const queue = terminalWriteQueueRef.current.get(sessionId)
+    if (queue) {
+      queue.push(data)
+    } else {
+      terminalWriteQueueRef.current.set(sessionId, [data])
+    }
+
+    if (terminalWriteRafRef.current.has(sessionId)) return
+
+    const rafId = requestAnimationFrame(() => {
+      terminalWriteRafRef.current.delete(sessionId)
+      const chunks = terminalWriteQueueRef.current.get(sessionId)
+      if (!chunks || chunks.length === 0) return
+      terminalWriteQueueRef.current.delete(sessionId)
+
+      const ref = terminalRefs.current.get(sessionId)
+      if (!ref) return
+      ref.terminal.write(chunks.join(''))
+    })
+
+    terminalWriteRafRef.current.set(sessionId, rafId)
+  }, [])
+
   // Load data
   useEffect(() => {
     if (!window.electronAPI) return
@@ -1096,7 +1186,8 @@ export default function App() {
           if (s.termBgImage) setTermBgImage(s.termBgImage)
           if (s.termFontSize != null) setTermFontSize(s.termFontSize)
           if (s.termLineHeight != null) setTermLineHeight(s.termLineHeight)
-          if (s.termTheme) setTermTheme(s.termTheme)
+          const normalizedTermTheme = s.termTheme === 'solarized' ? 'solarized-dark' : s.termTheme
+          if (normalizedTermTheme) setTermTheme(normalizedTermTheme)
           if (s.termCursorStyle) setTermCursorStyle(s.termCursorStyle)
           if (s.termCursorBlink != null) setTermCursorBlink(s.termCursorBlink)
           if (s.termOpacity != null) setTermOpacity(s.termOpacity)
@@ -1274,20 +1365,24 @@ export default function App() {
     if (!window.electronAPI) return
 
     const removeData = window.electronAPI.ssh.onData((sessionId, data) => {
-      const ref = terminalRefs.current.get(sessionId)
-      if (ref) {
-        ref.terminal.write(data)
-      }
+      enqueueTerminalWrite(sessionId, data)
     })
 
     const removeClose = window.electronAPI.ssh.onClose((sessionId) => {
+      clearTerminalWriteState(sessionId)
       setSessions((prev) => prev.filter((s) => s.id !== sessionId))
-      terminalRefs.current.delete(sessionId)
+      // 正确 dispose 终端实例并移除 DOM 容器，防止残留渲染内容
+      const termRef = terminalRefs.current.get(sessionId)
+      if (termRef) {
+        termRef.terminal.dispose()
+        termRef.container.remove()
+        terminalRefs.current.delete(sessionId)
+      }
       setActiveSessionId((prev) => {
         if (prev === sessionId) return null
         return prev
       })
-      showToast('连接已关闭', 'success')
+      showToast('连接已关闭', 'warning')
     })
 
     const removeError = window.electronAPI.ssh.onError((sessionId, error) => {
@@ -1297,25 +1392,56 @@ export default function App() {
       )
     })
 
+    const removeReconnecting = window.electronAPI.ssh.onReconnecting((sessionId, info) => {
+      setSessions((prev) =>
+        prev.map((s) => (s.id === sessionId ? { ...s, status: 'reconnecting' as const } : s))
+      )
+      showToast(`连接断开，正在重连... (${info.attempt}/${info.maxAttempts})`, 'warning')
+    })
+
+    const removeReconnected = window.electronAPI.ssh.onReconnected((sessionId) => {
+      setSessions((prev) =>
+        prev.map((s) => (s.id === sessionId ? { ...s, status: 'connected' as const } : s))
+      )
+      showToast('连接已恢复', 'success')
+    })
+
+    const removeReconnectFailed = window.electronAPI.ssh.onReconnectFailed((sessionId, reason) => {
+      clearTerminalWriteState(sessionId)
+      setSessions((prev) => prev.filter((s) => s.id !== sessionId))
+      const termRef = terminalRefs.current.get(sessionId)
+      if (termRef) {
+        termRef.terminal.dispose()
+        termRef.container.remove()
+        terminalRefs.current.delete(sessionId)
+      }
+      setActiveSessionId((prev) => {
+        if (prev === sessionId) return null
+        return prev
+      })
+      showToast(`重连失败: ${reason}`, 'error')
+    })
+
     return () => {
       removeData()
       removeClose()
       removeError()
+      removeReconnecting()
+      removeReconnected()
+      removeReconnectFailed()
     }
-  }, [])
+  }, [enqueueTerminalWrite, clearTerminalWriteState])
 
   // Local PTY event listeners
   useEffect(() => {
     if (!window.electronAPI) return
 
     const removePtyData = window.electronAPI.pty.onData((id, data) => {
-      const ref = terminalRefs.current.get(id)
-      if (ref) {
-        ref.terminal.write(data)
-      }
+      enqueueTerminalWrite(id, data)
     })
 
     const removePtyExit = window.electronAPI.pty.onExit((id) => {
+      clearTerminalWriteState(id)
       setSessions((prev) => prev.filter((s) => s.id !== id))
       const termRef = terminalRefs.current.get(id)
       if (termRef) {
@@ -1334,6 +1460,24 @@ export default function App() {
       removePtyData()
       removePtyExit()
     }
+  }, [enqueueTerminalWrite, clearTerminalWriteState])
+
+  // 窗口关闭前清理所有终端实例，防止 canvas 渲染残留到下次启动
+  useEffect(() => {
+    if (!window.electronAPI?.window?.onBeforeClose) return
+    const removeListener = window.electronAPI.window.onBeforeClose(() => {
+      terminalRefs.current.forEach((_ref, sessionId) => {
+        clearTerminalWriteState(sessionId)
+      })
+      terminalRefs.current.forEach((ref) => {
+        ref.terminal.dispose()
+        if (ref.container.parentNode) {
+          ref.container.remove()
+        }
+      })
+      terminalRefs.current.clear()
+    })
+    return removeListener
   }, [])
 
   // Auto scroll chat to bottom
@@ -1343,10 +1487,596 @@ export default function App() {
     }
   }, [chatMessages, activeSessionId])
 
-  const showToast = (message: string, type: 'success' | 'error') => {
+  const showToast = (message: string, type: 'success' | 'error' | 'warning') => {
     setToast({ message, type })
     setTimeout(() => setToast(null), 3000)
   }
+
+  const closeContextMenu = useCallback(() => {
+    setContextMenu(INITIAL_CONTEXT_MENU_STATE)
+  }, [])
+
+  useEffect(() => {
+    const off = window.electronAPI.nativeMenu.onFileMenuAction((requestId, actionId) => {
+      if (fileMenuActionStateRef.current.requestId !== requestId) return
+      const action = fileMenuActionStateRef.current.actions[actionId]
+      if (!action) return
+      action()
+      fileMenuActionStateRef.current = { requestId: '', actions: {} }
+    })
+    return () => off()
+  }, [])
+
+  // --- Terminal context menu handler ---
+  const handleTerminalContextMenu = useCallback((e: MouseEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    if (!activeSessionId) return
+    const ref = terminalRefs.current.get(activeSessionId)
+    if (!ref) return
+
+    const hasSelection = ref.terminal.hasSelection()
+
+    const items = buildTerminalMenuItems({
+      hasSelection,
+      isMac: platform === 'darwin',
+      onCopy: () => {
+        const sel = ref.terminal.getSelection()
+        if (sel) window.electronAPI.clipboard.writeText(sel)
+      },
+      onPaste: async () => {
+        const text = await window.electronAPI.clipboard.readText()
+        if (text) {
+          if (activeSessionId.startsWith('local-')) {
+            window.electronAPI.pty.write(activeSessionId, text)
+          } else {
+            window.electronAPI.ssh.sendData(activeSessionId, text)
+          }
+        }
+      },
+      onSelectAll: () => ref.terminal.selectAll(),
+      onClear: () => {
+        // 先 reset 重置终端状态（光标位置、SGR 颜色属性、字符集等），再 clear 清除缓冲区
+        // 不再手动调用 refresh()，避免与后续 shell 回传的 ANSI 清屏序列产生时序竞争
+        ref.terminal.reset()
+        ref.terminal.clear()
+        // 发送清屏指令给 shell，同步清除 PTY 侧缓冲区并触发 prompt 重绘
+        if (activeSessionId.startsWith('local-')) {
+          if (platform === 'win32') {
+            window.electronAPI.pty.write(activeSessionId, 'cls\r')
+          } else {
+            window.electronAPI.pty.write(activeSessionId, '\x0c')
+          }
+        } else {
+          window.electronAPI.ssh.sendData(activeSessionId, '\x0c')
+        }
+        ref.terminal.focus()
+      }
+    })
+
+    setContextMenu({ visible: true, x: e.clientX, y: e.clientY, items })
+  }, [activeSessionId, platform])
+
+  // Attach terminal contextmenu listener
+  useEffect(() => {
+    const wrapper = terminalWrapperRef.current
+    if (!wrapper) return
+    wrapper.addEventListener('contextmenu', handleTerminalContextMenu)
+    return () => wrapper.removeEventListener('contextmenu', handleTerminalContextMenu)
+  }, [handleTerminalContextMenu])
+
+  // --- Terminal keyboard shortcuts (Ctrl+Shift+C/V for terminal) ---
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (!activeSessionId) return
+      const ref = terminalRefs.current.get(activeSessionId)
+      if (!ref) return
+
+      // Check if the focus is inside the terminal wrapper
+      const wrapper = terminalWrapperRef.current
+      if (!wrapper || !wrapper.contains(document.activeElement)) return
+
+      // Terminal: Ctrl+Shift+C or Cmd+C (mac) to copy
+      if (platform === 'darwin' && e.metaKey && e.key === 'c' && ref.terminal.hasSelection()) {
+        e.preventDefault()
+        const sel = ref.terminal.getSelection()
+        if (sel) window.electronAPI.clipboard.writeText(sel)
+        return
+      }
+      if (platform !== 'darwin' && e.ctrlKey && e.shiftKey && e.key === 'C') {
+        e.preventDefault()
+        const sel = ref.terminal.getSelection()
+        if (sel) window.electronAPI.clipboard.writeText(sel)
+        return
+      }
+
+      // Terminal: Ctrl+Shift+V or Cmd+V to paste
+      if (platform === 'darwin' && e.metaKey && e.key === 'v') {
+        e.preventDefault()
+        window.electronAPI.clipboard.readText().then(text => {
+          if (text) {
+            if (activeSessionId.startsWith('local-')) {
+              window.electronAPI.pty.write(activeSessionId, text)
+            } else {
+              window.electronAPI.ssh.sendData(activeSessionId, text)
+            }
+          }
+        })
+        return
+      }
+      if (platform !== 'darwin' && e.ctrlKey && e.shiftKey && e.key === 'V') {
+        e.preventDefault()
+        window.electronAPI.clipboard.readText().then(text => {
+          if (text) {
+            if (activeSessionId.startsWith('local-')) {
+              window.electronAPI.pty.write(activeSessionId, text)
+            } else {
+              window.electronAPI.ssh.sendData(activeSessionId, text)
+            }
+          }
+        })
+        return
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyDown, true)
+    return () => window.removeEventListener('keydown', handleKeyDown, true)
+  }, [activeSessionId, platform])
+
+  // --- File manager operation helpers (shared by context menu & keyboard shortcuts) ---
+  const fileOps = useMemo(() => {
+    const getSelectedFilePath = () => {
+      if (!fmSelectedFile) return ''
+      return fmCurrentPath.endsWith('/')
+        ? `${fmCurrentPath}${fmSelectedFile.name}`
+        : `${fmCurrentPath}/${fmSelectedFile.name}`
+    }
+
+    return {
+      copyFile: () => {
+        const filesToCopy = fmSelectedFiles.length > 0 ? fmSelectedFiles : (fmSelectedFile ? [fmSelectedFile] : [])
+        if (filesToCopy.length === 0 || !activeSessionId) return
+        const items = filesToCopy.map(f => ({
+          path: fmCurrentPath.endsWith('/') ? `${fmCurrentPath}${f.name}` : `${fmCurrentPath}/${f.name}`,
+          type: f.type
+        }))
+        setFileClipboard({ items, mode: 'copy', sessionId: activeSessionId })
+        showToast(`已复制 ${filesToCopy.length} 个文件`, 'success')
+      },
+      cutFile: () => {
+        const filesToCut = fmSelectedFiles.length > 0 ? fmSelectedFiles : (fmSelectedFile ? [fmSelectedFile] : [])
+        if (filesToCut.length === 0 || !activeSessionId) return
+        const items = filesToCut.map(f => ({
+          path: fmCurrentPath.endsWith('/') ? `${fmCurrentPath}${f.name}` : `${fmCurrentPath}/${f.name}`,
+          type: f.type
+        }))
+        setFileClipboard({ items, mode: 'cut', sessionId: activeSessionId })
+        showToast(`已剪切 ${filesToCut.length} 个文件`, 'success')
+      },
+      pasteFile: async (targetDir: string) => {
+        if (!fileClipboard || !activeSessionId) return
+        if (fileClipboard.sessionId !== activeSessionId) {
+          showToast('暂不支持跨会话粘贴，请在原会话中粘贴', 'error')
+          return
+        }
+
+        let failCount = 0
+        for (const item of fileClipboard.items) {
+          const srcPath = item.path
+          const fileName = srcPath.split(/[/\\]/).pop() || ''
+          // 兼容 Windows 本地路径的分隔符
+          const sep = targetDir.includes('\\') ? '\\' : '/'
+          const destPath = targetDir.endsWith(sep) || targetDir.endsWith('/') ? `${targetDir}${fileName}` : `${targetDir}${sep}${fileName}`
+
+          // 规范化路径比较，防止 ./ 或尾随分隔符导致的误判
+          const normalize = (p: string) => {
+            const unified = p.replace(/\\/g, '/').replace(/\/\.\//g, '/').replace(/\/+/g, '/')
+            return unified.replace(/\/+$/, '')
+          }
+          const normalizedSrc = normalize(srcPath)
+          const normalizedDest = normalize(destPath)
+          if (normalizedSrc === normalizedDest) { failCount++; continue }
+
+          try {
+            const op = fileClipboard.mode === 'copy'
+              ? window.electronAPI.sftp.copy
+              : window.electronAPI.sftp.move
+            const res = await op(activeSessionId, srcPath, destPath)
+            if (!res.success) failCount++
+          } catch { failCount++ }
+        }
+
+        const total = fileClipboard.items.length
+        if (failCount === 0) {
+          showToast(`粘贴成功 ${total} 个文件`, 'success')
+        } else if (failCount < total) {
+          showToast(`粘贴完成: ${total - failCount} 成功, ${failCount} 失败`, 'error')
+        } else {
+          showToast(`粘贴失败`, 'error')
+        }
+        if (fileClipboard.mode === 'cut') setFileClipboard(null)
+        setFmReloadToken(t => t + 1)
+      },
+      renameFile: () => {
+        if (!fmSelectedFile) return
+        fileManagerPanelRef.current?.startRename(fmSelectedFile.name)
+      },
+      deleteFile: () => {
+        const filesToDelete = fmSelectedFiles.length > 0 ? fmSelectedFiles : (fmSelectedFile ? [fmSelectedFile] : [])
+        if (filesToDelete.length === 0 || !activeSessionId) return
+
+        const nameList = filesToDelete.map(f => f.name).join('、')
+        setConfirmModal({
+          visible: true,
+          title: '确认删除',
+          message: `确定要删除以下 ${filesToDelete.length} 个文件吗？此操作不可恢复。\n\n${nameList}`,
+          confirmText: '删除',
+          cancelText: '取消',
+          onConfirm: async () => {
+            let failCount = 0
+            for (const file of filesToDelete) {
+              const filePath = fmCurrentPath.endsWith('/') ? `${fmCurrentPath}${file.name}` : `${fmCurrentPath}/${file.name}`
+              try {
+                const res = await window.electronAPI.sftp.delete(activeSessionId, filePath)
+                if (!res.success) failCount++
+              } catch {
+                failCount++
+              }
+            }
+
+            if (failCount === 0) {
+              showToast(`已删除 ${filesToDelete.length} 个文件`, 'success')
+            } else if (failCount < filesToDelete.length) {
+              showToast(`删除完成: ${filesToDelete.length - failCount} 成功, ${failCount} 失败`, 'error')
+            } else {
+              showToast(`删除失败`, 'error')
+            }
+            setFmReloadToken(t => t + 1)
+          }
+        })
+      },
+      downloadFile: async () => {
+        const filesToDownload = fmSelectedFiles.length > 0 ? fmSelectedFiles : (fmSelectedFile ? [fmSelectedFile] : [])
+        if (filesToDownload.length === 0 || !activeSessionId) return
+
+        const defaultDir = settings?.defaultDownloadPath
+        let targetDir = ''
+        if (defaultDir) {
+          targetDir = defaultDir
+        } else {
+          const res = await window.electronAPI.dialog.selectDirectory()
+          if (res.canceled || !res.filePaths.length) return
+          targetDir = res.filePaths[0]
+        }
+
+        const sep = targetDir.includes('\\') ? '\\' : '/'
+        let failCount = 0
+        let lastError = ''
+        for (const file of filesToDownload) {
+          const remotePath = fmCurrentPath.endsWith('/') ? `${fmCurrentPath}${file.name}` : `${fmCurrentPath}/${file.name}`
+          const localPath = `${targetDir}${sep}${file.name}`
+          try {
+            const downloadRes = file.type === 'd'
+              ? await window.electronAPI.sftp.downloadDir(activeSessionId, remotePath, localPath)
+              : await window.electronAPI.sftp.download(activeSessionId, remotePath, localPath)
+            if (!downloadRes.success) {
+              failCount++
+              lastError = downloadRes.error || '未知错误'
+            }
+          } catch (err: any) {
+            failCount++
+            lastError = err?.message || String(err)
+          }
+        }
+
+        const total = filesToDownload.length
+        if (failCount === 0) {
+          showToast(`已下载 ${total} 个文件到 ${targetDir}`, 'success')
+        } else if (failCount < total) {
+          showToast(`下载完成: ${total - failCount} 成功, ${failCount} 失败${lastError ? ` (${lastError})` : ''}`, 'error')
+        } else {
+          showToast(`下载失败${lastError ? `: ${lastError}` : ''}`, 'error')
+        }
+      },
+      copyPath: () => {
+        if (!fmSelectedFile) return
+        const filePath = getSelectedFilePath()
+        window.electronAPI.clipboard.writeText(filePath)
+        showToast(`路径已复制: ${filePath}`, 'success')
+      },
+      refresh: () => {
+        setFmReloadToken(t => t + 1)
+      }
+    }
+  }, [activeSessionId, fmSelectedFile, fmSelectedFiles, fmCurrentPath, fileClipboard, settings])
+
+  // --- File manager keyboard shortcuts ---
+  useEffect(() => {
+    if (!showFileManager || !activeSessionId) return
+
+    const handleFileKeyDown = (e: KeyboardEvent) => {
+      // Only handle when file manager panel or its children have focus
+      const fmPanel = document.querySelector('.file-manager-panel')
+      if (!fmPanel) return
+
+      // Skip when editing in input/textarea (rename, path editing)
+      const active = document.activeElement
+      if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA')) return
+
+      // Only handle when fm panel itself or its child has focus
+      if (!fmPanel.contains(active as Node)) return
+
+      const mod = platform === 'darwin' ? e.metaKey : e.ctrlKey
+
+      // Ctrl/Cmd + C: Copy file
+      if (mod && e.key.toLowerCase() === 'c' && !e.shiftKey) {
+        if (fmSelectedFile) {
+          e.preventDefault()
+          fileOps.copyFile()
+        }
+        return
+      }
+
+      // Ctrl/Cmd + X: Cut file
+      if (mod && e.key.toLowerCase() === 'x' && !e.shiftKey) {
+        if (fmSelectedFile) {
+          e.preventDefault()
+          fileOps.cutFile()
+        }
+        return
+      }
+
+      // Ctrl/Cmd + V: Paste file
+      if (mod && e.key.toLowerCase() === 'v' && !e.shiftKey) {
+        if (fileClipboard) {
+          e.preventDefault()
+          fileOps.pasteFile(fmCurrentPath)
+        }
+        return
+      }
+
+      // F2: Rename
+      if (e.key === 'F2') {
+        if (fmSelectedFile) {
+          e.preventDefault()
+          fileOps.renameFile()
+        }
+        return
+      }
+
+      // Delete: Delete file
+      if (e.key === 'Delete') {
+        if (fmSelectedFile) {
+          e.preventDefault()
+          fileOps.deleteFile()
+        }
+        return
+      }
+
+      // F5: Refresh
+      if (e.key === 'F5') {
+        e.preventDefault()
+        fileOps.refresh()
+        return
+      }
+    }
+
+    window.addEventListener('keydown', handleFileKeyDown, true)
+    return () => window.removeEventListener('keydown', handleFileKeyDown, true)
+  }, [showFileManager, activeSessionId, platform, fmSelectedFile, fmSelectedFiles, fileClipboard, fmCurrentPath, fileOps])
+
+  // --- File manager context menu handler ---
+  const handleFileContextMenu = useCallback((event: React.MouseEvent, ctx: { currentPath: string; file?: SFTPFile }) => {
+    const hasFile = !!ctx.file
+    const filePath = hasFile
+      ? (ctx.currentPath.endsWith('/') ? `${ctx.currentPath}${ctx.file!.name}` : `${ctx.currentPath}/${ctx.file!.name}`)
+      : ''
+
+    const items = buildFileMenuItems({
+      hasFile,
+      fileName: ctx.file?.name,
+      isDirectory: ctx.file?.type === 'd',
+      hasClipboard: !!fileClipboard && fileClipboard.sessionId === activeSessionId,
+      isMac: platform === 'darwin',
+      onEdit: () => {
+        if (!hasFile || !activeSessionId || !ctx.file || ctx.file.type === 'd') return
+        setEditingFile({ sessionId: activeSessionId, filePath, fileName: ctx.file.name })
+      },
+      onCopyFile: () => {
+        if (!activeSessionId) return
+        const filesToCopy = fmSelectedFiles.length > 0 ? fmSelectedFiles : (ctx.file ? [ctx.file] : [])
+        if (filesToCopy.length === 0) return
+        const items = filesToCopy.map(f => ({
+          path: ctx.currentPath.endsWith('/') ? `${ctx.currentPath}${f.name}` : `${ctx.currentPath}/${f.name}`,
+          type: f.type
+        }))
+        setFileClipboard({ items, mode: 'copy', sessionId: activeSessionId })
+        showToast(`已复制 ${filesToCopy.length} 个文件`, 'success')
+      },
+      onCutFile: () => {
+        if (!activeSessionId) return
+        const filesToCut = fmSelectedFiles.length > 0 ? fmSelectedFiles : (ctx.file ? [ctx.file] : [])
+        if (filesToCut.length === 0) return
+        const items = filesToCut.map(f => ({
+          path: ctx.currentPath.endsWith('/') ? `${ctx.currentPath}${f.name}` : `${ctx.currentPath}/${f.name}`,
+          type: f.type
+        }))
+        setFileClipboard({ items, mode: 'cut', sessionId: activeSessionId })
+        showToast(`已剪切 ${filesToCut.length} 个文件`, 'success')
+      },
+      onPasteFile: () => fileOps.pasteFile(ctx.currentPath),
+      onRename: () => {
+        if (!ctx.file) return
+        fileManagerPanelRef.current?.startRename(ctx.file.name)
+      },
+      onDelete: () => {
+        const filesToDelete = fmSelectedFiles.length > 0
+          ? fmSelectedFiles
+          : (ctx.file ? [ctx.file] : [])
+        if (filesToDelete.length === 0 || !activeSessionId) return
+
+        const nameList = filesToDelete.map(f => f.name).join('、')
+        setConfirmModal({
+          visible: true,
+          title: '确认删除',
+          message: `确定要删除以下 ${filesToDelete.length} 个文件吗？此操作不可恢复。\n\n${nameList}`,
+          confirmText: '删除',
+          cancelText: '取消',
+          onConfirm: async () => {
+            let failCount = 0
+            for (const file of filesToDelete) {
+              const fp = ctx.currentPath.endsWith('/') ? `${ctx.currentPath}${file.name}` : `${ctx.currentPath}/${file.name}`
+              try {
+                const res = await window.electronAPI.sftp.delete(activeSessionId, fp)
+                if (!res.success) failCount++
+              } catch {
+                failCount++
+              }
+            }
+
+            if (failCount === 0) {
+              showToast(`已删除 ${filesToDelete.length} 个文件`, 'success')
+            } else if (failCount < filesToDelete.length) {
+              showToast(`删除完成: ${filesToDelete.length - failCount} 成功, ${failCount} 失败`, 'error')
+            } else {
+              showToast(`删除失败`, 'error')
+            }
+            setFmReloadToken(t => t + 1)
+          }
+        })
+      },
+      onDownload: async () => {
+        const filesToDownload = fmSelectedFiles.length > 0 ? fmSelectedFiles : (ctx.file ? [ctx.file] : [])
+        if (filesToDownload.length === 0 || !activeSessionId) return
+
+        const defaultDir = settings?.defaultDownloadPath
+        let targetDir = ''
+        if (defaultDir) {
+          targetDir = defaultDir
+        } else {
+          const res = await window.electronAPI.dialog.selectDirectory()
+          if (res.canceled || !res.filePaths.length) return
+          targetDir = res.filePaths[0]
+        }
+
+        const sep = targetDir.includes('\\') ? '\\' : '/'
+        let failCount = 0
+        let lastError = ''
+        for (const file of filesToDownload) {
+          const remotePath = ctx.currentPath.endsWith('/') ? `${ctx.currentPath}${file.name}` : `${ctx.currentPath}/${file.name}`
+          const localPath = `${targetDir}${sep}${file.name}`
+          try {
+            const downloadRes = file.type === 'd'
+              ? await window.electronAPI.sftp.downloadDir(activeSessionId, remotePath, localPath)
+              : await window.electronAPI.sftp.download(activeSessionId, remotePath, localPath)
+            if (!downloadRes.success) {
+              failCount++
+              lastError = downloadRes.error || '未知错误'
+            }
+          } catch (err: any) {
+            failCount++
+            lastError = err?.message || String(err)
+          }
+        }
+
+        const total = filesToDownload.length
+        if (failCount === 0) {
+          showToast(`已下载 ${total} 个文件到 ${targetDir}`, 'success')
+        } else if (failCount < total) {
+          showToast(`下载完成: ${total - failCount} 成功, ${failCount} 失败${lastError ? ` (${lastError})` : ''}`, 'error')
+        } else {
+          showToast(`下载失败${lastError ? `: ${lastError}` : ''}`, 'error')
+        }
+      },
+      onCopyPath: () => {
+        if (!filePath) return
+        window.electronAPI.clipboard.writeText(filePath)
+        showToast(`路径已复制: ${filePath}`, 'success')
+      },
+      onRefresh: () => {
+        setFmReloadToken(t => t + 1)
+      },
+      onCreateFile: () => {
+        if (!activeSessionId) return
+        setPromptValue('')
+        setPromptModal({
+          visible: true,
+          title: '新建文件',
+          placeholder: '请输入文件名',
+          onConfirm: (name: string) => {
+            const newPath = ctx.currentPath.endsWith('/')
+              ? `${ctx.currentPath}${name}`
+              : `${ctx.currentPath}/${name}`
+            window.electronAPI.sftp.createFile(activeSessionId, newPath).then(res => {
+              if (res.success) {
+                showToast(`文件已创建: ${name}`, 'success')
+                setFmReloadToken(t => t + 1)
+              } else {
+                showToast(`创建文件失败: ${res.error}`, 'error')
+              }
+            }).catch((err: any) => {
+              showToast(`创建文件异常: ${err.message}`, 'error')
+            })
+          }
+        })
+        setTimeout(() => promptInputRef.current?.focus(), 50)
+      },
+      onCreateFolder: () => {
+        if (!activeSessionId) return
+        setPromptValue('')
+        setPromptModal({
+          visible: true,
+          title: '新建文件夹',
+          placeholder: '请输入文件夹名',
+          onConfirm: (name: string) => {
+            const newPath = ctx.currentPath.endsWith('/')
+              ? `${ctx.currentPath}${name}`
+              : `${ctx.currentPath}/${name}`
+            window.electronAPI.sftp.mkdir(activeSessionId, newPath).then(res => {
+              if (res.success) {
+                showToast(`文件夹已创建: ${name}`, 'success')
+                setFmReloadToken(t => t + 1)
+              } else {
+                showToast(`创建文件夹失败: ${res.error}`, 'error')
+              }
+            }).catch((err: any) => {
+              showToast(`创建文件夹异常: ${err.message}`, 'error')
+            })
+          }
+        })
+        setTimeout(() => promptInputRef.current?.focus(), 50)
+      }
+    })
+
+    const menuItems = items.filter(item => !item.hidden)
+    const actionMap: Record<string, () => void> = {}
+
+    const nativeItems = menuItems.map((item, index) => {
+      if (item.separator) {
+        return { id: `sep-${index}`, type: 'separator' as const }
+      }
+      if (item.onClick) {
+        actionMap[item.id] = item.onClick
+      }
+      return {
+        id: item.id,
+        label: item.label,
+        shortcut: item.shortcut,
+        type: 'normal' as const,
+        enabled: !item.disabled,
+        danger: item.danger === true
+      }
+    })
+
+    const clickX = Number.isFinite(event.clientX) ? event.clientX : event.nativeEvent.clientX
+    const clickY = Number.isFinite(event.clientY) ? event.clientY : event.nativeEvent.clientY
+    const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+    fileMenuActionStateRef.current = { requestId, actions: actionMap }
+    window.electronAPI.nativeMenu.openFileContextMenu({ requestId, x: clickX, y: clickY, items: nativeItems }).catch((err: any) => {
+      fileMenuActionStateRef.current = { requestId: '', actions: {} }
+      showToast(`打开文件菜单失败: ${err.message}`, 'error')
+    })
+  }, [activeSessionId, fileClipboard, platform, settings, fileOps])
 
   // Create terminal for a session — creates a persistent container div
   const createTerminal = useCallback(
@@ -1377,6 +2107,8 @@ export default function App() {
       const fitAddon = new FitAddon()
       terminal.loadAddon(fitAddon)
       terminal.open(container)
+      // 重置终端状态，防止复用残留的渲染样式（光标位置、SGR 属性等）
+      terminal.reset()
 
       setTimeout(() => {
         fitAddon.fit()
@@ -1440,21 +2172,27 @@ export default function App() {
   useEffect(() => {
     if (!activeSessionId || !terminalWrapperRef.current) return
 
+    let resizeTimer: ReturnType<typeof setTimeout> | null = null
     const observer = new ResizeObserver(() => {
-      const ref = terminalRefs.current.get(activeSessionId)
-      if (ref) {
-        setTimeout(() => {
+      if (resizeTimer) clearTimeout(resizeTimer)
+      resizeTimer = setTimeout(() => {
+        const ref = terminalRefs.current.get(activeSessionId)
+        if (ref) {
           ref.fitAddon.fit()
           const dims = ref.fitAddon.proposeDimensions()
           if (dims) {
-            window.electronAPI.ssh.resize(activeSessionId, dims.cols, dims.rows)
+            if (activeSessionId.startsWith('local-')) {
+              window.electronAPI.pty.resize(activeSessionId, dims.cols, dims.rows)
+            } else {
+              window.electronAPI.ssh.resize(activeSessionId, dims.cols, dims.rows)
+            }
           }
-        }, 50)
-      }
+        }
+      }, 150)
     })
 
     observer.observe(terminalWrapperRef.current)
-    return () => observer.disconnect()
+    return () => { observer.disconnect(); if (resizeTimer) clearTimeout(resizeTimer) }
   }, [activeSessionId])
 
   // Apply terminal settings to all instances
@@ -1492,9 +2230,9 @@ export default function App() {
   const handleConnect = async (conn: ConnectionConfig) => {
     // Prevent double-connect
     if (connectingId === conn.id) return
-    if (sessions.some((s) => s.connectionId === conn.id && (s.status === 'connected' || s.status === 'connecting'))) {
+    if (sessions.some((s) => s.connectionId === conn.id && (s.status === 'connected' || s.status === 'connecting' || s.status === 'reconnecting'))) {
       // Already connected — switch to that session
-      const existing = sessions.find((s) => s.connectionId === conn.id && s.status === 'connected')
+      const existing = sessions.find((s) => s.connectionId === conn.id && (s.status === 'connected' || s.status === 'reconnecting'))
       if (existing) setActiveSessionId(existing.id)
       return
     }
@@ -1522,6 +2260,7 @@ export default function App() {
 
   // Disconnect
   const handleDisconnect = async (sessionId: string) => {
+    clearTerminalWriteState(sessionId)
     const session = sessions.find(s => s.id === sessionId)
     if (session?.isLocal) {
       await window.electronAPI.pty.kill(sessionId)
@@ -1564,7 +2303,9 @@ export default function App() {
   }
 
   const handleDisconnectAll = () => {
-    sessions.forEach((s) => handleDisconnect(s.id))
+    sessions.forEach((s) => {
+      handleDisconnect(s.id)
+    })
   }
 
   // Save connection
@@ -2281,7 +3022,7 @@ ${historyStr.slice(-15000)}
     return chatHistoryList.filter(h => h.sessionKey.startsWith(activeConnectionId))
   }, [chatHistoryList, activeConnectionId])
 
-  const connectedSessions = sessions.filter((s) => s.status === 'connected')
+  const connectedSessions = sessions.filter((s) => s.status === 'connected' || s.status === 'reconnecting')
 
   return (
     <div className="app-layout">
@@ -2347,7 +3088,7 @@ ${historyStr.slice(-15000)}
                   onClick={() => setActiveSessionId(session.id)}
                   title={session.name + ' — ' + session.host}
                 >
-                  <span className="session-dot" />
+                  <span className={`session-dot${session.status === 'reconnecting' ? ' reconnecting' : ''}`} />
                   {!sidebarCollapsed && (
                     <>
                       <span>{session.name}</span>
@@ -2794,12 +3535,34 @@ ${historyStr.slice(-15000)}
                 {/* 1. File Manager Panel (Left) */}
                 {showFileManager && (
                   <div className="bottom-panel-section" style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 300, borderRight: showAiPanel ? '1px solid rgba(255,255,255,0.06)' : 'none', overflow: 'hidden' }}>
-                    <FileManagerPanel 
-                      sessionId={activeSessionId} 
+                    <FileManagerPanel
+                      ref={fileManagerPanelRef}
+                      sessionId={activeSessionId}
                       settings={settings}
-                      onClose={() => setShowFileManager(false)} 
-                      onToast={(msg, type) => setToast({ message: msg, type: type === 'info' ? 'success' : type as 'success' | 'error' })} 
+                      onClose={() => setShowFileManager(false)}
+                      onToast={(msg, type) => setToast({ message: msg, type: type === 'info' ? 'success' : type as 'success' | 'error' })}
+                      reloadToken={fmReloadToken}
+                      onContextMenuRequest={handleFileContextMenu}
+                      onStateChange={(state) => {
+                        if (state.currentPath !== undefined) setFmCurrentPath(state.currentPath)
+                        if (state.selectedFile !== undefined) setFmSelectedFile(state.selectedFile ?? null)
+                        if (state.selectedFiles !== undefined) setFmSelectedFiles(state.selectedFiles)
+                      }}
+                      cutFilePaths={fileClipboard?.mode === 'cut' && fileClipboard.sessionId === activeSessionId ? fileClipboard.items.map(i => i.path) : null}
+                      onEditFile={(filePath, fileName) => {
+                        setEditingFile({ sessionId: activeSessionId, filePath, fileName })
+                      }}
                     />
+                    {editingFile && editingFile.sessionId === activeSessionId && (
+                      <FileEditorPanel
+                        sessionId={editingFile.sessionId}
+                        filePath={editingFile.filePath}
+                        fileName={editingFile.fileName}
+                        onClose={() => setEditingFile(null)}
+                        onToast={(msg, type) => setToast({ message: msg, type: type === 'info' ? 'success' : type as 'success' | 'error' })}
+                        onSaved={() => setFmReloadToken(t => t + 1)}
+                      />
+                    )}
                   </div>
                 )}
                 
@@ -3209,14 +3972,30 @@ ${historyStr.slice(-15000)}
                   </div>
                 )
               })()}
-              {currentChatMessages.map((msg, i) => (
-                <ChatMessageView
-                  key={i}
-                  message={msg}
-                  relaxedMode={settings.relaxedMode}
-                  onExecute={executeCommand}
-                />
-              ))}
+              {(() => {
+                const msgs = currentChatMessages
+                const VISIBLE_WINDOW = 30
+                // 虚拟滚动：超过 VISIBLE_WINDOW 条消息时，只渲染最后 VISIBLE_WINDOW 条
+                const startIdx = msgs.length > VISIBLE_WINDOW ? msgs.length - VISIBLE_WINDOW : 0
+                const visibleMsgs = msgs.slice(startIdx)
+                return (
+                  <>
+                    {startIdx > 0 && (
+                      <div className="chat-truncated-hint" style={{ textAlign: 'center', padding: '8px', color: 'var(--text-muted)', fontSize: 12 }}>
+                        ↑ 已省略 {startIdx} 条历史消息
+                      </div>
+                    )}
+                    {visibleMsgs.map((msg, i) => (
+                      <ChatMessageView
+                        key={startIdx + i}
+                        message={msg}
+                        relaxedMode={settings.relaxedMode}
+                        onExecute={executeCommand}
+                      />
+                    ))}
+                  </>
+                )
+              })()}
               {/* Streaming content — show AI response as it arrives */}
               {aiLoading && streamingContent && (() => {
                 // In relaxed mode: if content looks like JSON workflow, show planning message
@@ -3347,7 +4126,8 @@ ${historyStr.slice(-15000)}
             <div className="server-grid">
               {connections.map((conn) => {
                 const isConnecting = connectingId === conn.id
-                const isConnected = sessions.some((s) => s.connectionId === conn.id && s.status === 'connected')
+                const isConnected = sessions.some((s) => s.connectionId === conn.id && (s.status === 'connected' || s.status === 'reconnecting'))
+                const isReconnecting = sessions.some((s) => s.connectionId === conn.id && s.status === 'reconnecting')
                 const hasBg = !!conn.bgImage
                 return (
                   <div
@@ -3361,7 +4141,7 @@ ${historyStr.slice(-15000)}
                       {isConnecting ? (
                         <div className="card-connecting-spinner" />
                       ) : (
-                        <span className={`server-status ${isConnected ? 'online' : 'offline'}`} />
+                        <span className={`server-status ${isReconnecting ? 'reconnecting' : isConnected ? 'online' : 'offline'}`} />
                       )}
                       <span className="server-card-name">{conn.name}</span>
                       {isConnecting && (
@@ -3540,8 +4320,84 @@ ${historyStr.slice(-15000)}
         }}
       />
 
+      {/* Context Menu */}
+      <ContextMenu state={contextMenu} onClose={closeContextMenu} />
+
+      {/* Prompt Modal */}
+      {promptModal.visible && (
+        <div className="modal-overlay" onClick={() => setPromptModal(m => ({ ...m, visible: false }))}>
+          <div className="modal-content" style={{ width: 360 }} onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <span className="modal-title">{promptModal.title}</span>
+              <button className="modal-close" onClick={() => setPromptModal(m => ({ ...m, visible: false }))}>×</button>
+            </div>
+            <div className="modal-body">
+              <input
+                ref={promptInputRef}
+                className="form-input"
+                placeholder={promptModal.placeholder || ''}
+                value={promptValue}
+                onChange={e => setPromptValue(e.target.value)}
+                onKeyDown={e => {
+                  if (e.key === 'Enter' && promptValue.trim()) {
+                    setPromptModal(m => ({ ...m, visible: false }))
+                    promptModal.onConfirm(promptValue.trim())
+                  } else if (e.key === 'Escape') {
+                    setPromptModal(m => ({ ...m, visible: false }))
+                  }
+                }}
+                autoFocus
+              />
+            </div>
+            <div className="modal-footer">
+              <button className="btn btn-secondary" onClick={() => setPromptModal(m => ({ ...m, visible: false }))}>取消</button>
+              <button
+                className="btn btn-primary"
+                disabled={!promptValue.trim()}
+                onClick={() => {
+                  if (promptValue.trim()) {
+                    setPromptModal(m => ({ ...m, visible: false }))
+                    promptModal.onConfirm(promptValue.trim())
+                  }
+                }}
+              >确定</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Confirm Modal */}
+      {confirmModal.visible && (
+        <div className="modal-overlay" onClick={() => setConfirmModal(m => ({ ...m, visible: false }))}>
+          <div className="modal-content confirm-modal" style={{ width: 400 }} onClick={e => e.stopPropagation()}>
+            <div className="confirm-modal-body">
+              <div className="confirm-modal-icon">!</div>
+              <div className="confirm-modal-title">{confirmModal.title}</div>
+              <div className="confirm-modal-message" style={{ whiteSpace: 'pre-line' }}>{confirmModal.message}</div>
+            </div>
+            <div className="confirm-modal-footer">
+              <button className="btn btn-secondary" onClick={() => setConfirmModal(m => ({ ...m, visible: false }))}>
+                {confirmModal.cancelText || '取消'}
+              </button>
+              <button
+                className="btn btn-danger"
+                onClick={() => {
+                  setConfirmModal(m => ({ ...m, visible: false }))
+                  confirmModal.onConfirm()
+                }}
+              >
+                {confirmModal.confirmText || '确定'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Toast */}
       {toast && <div className={`toast ${toast.type}`}>{toast.message}<button className="toast-close" onClick={() => setToast(null)}>✕</button></div>}
+
+      {/* File Progress Panel */}
+      <FileProgressPanel />
     </div>
   )
 }

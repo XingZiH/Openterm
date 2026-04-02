@@ -1,14 +1,25 @@
-import React, { useState, useEffect, useRef } from 'react'
+import React, { useState, useEffect, useRef, forwardRef, useImperativeHandle, useCallback } from 'react'
 import { SFTPFile } from '../types'
+
+export interface FileManagerPanelHandle {
+  startRename: (fileName: string) => void
+}
 
 interface FileManagerPanelProps {
   sessionId: string
   settings: any
   onClose?: () => void
   onToast: (msg: string, type: 'success' | 'error' | 'info') => void
+  reloadToken?: number
+  onStateChange?: (state: { currentPath?: string; selectedFile?: SFTPFile | null; selectedFiles?: SFTPFile[] }) => void
+  onContextMenuRequest?: (event: React.MouseEvent, ctx: { currentPath: string; file?: SFTPFile }) => void
+  cutFilePaths?: string[] | null
+  onEditFile?: (filePath: string, fileName: string) => void
 }
 
-export function FileManagerPanel({ sessionId, settings, onClose, onToast }: FileManagerPanelProps) {
+const MARQUEE_THRESHOLD = 4
+
+export const FileManagerPanel = forwardRef<FileManagerPanelHandle, FileManagerPanelProps>(function FileManagerPanelInner({ sessionId, settings, onClose, onToast, reloadToken = 0, onStateChange, onContextMenuRequest, cutFilePaths, onEditFile }, ref) {
   const [currentPath, setCurrentPath] = useState<string>('/')
   const [files, setFiles] = useState<SFTPFile[]>([])
   const [loading, setLoading] = useState<boolean>(false)
@@ -16,6 +27,54 @@ export function FileManagerPanel({ sessionId, settings, onClose, onToast }: File
   const [isEditingPath, setIsEditingPath] = useState<boolean>(false)
   const [editPath, setEditPath] = useState<string>('/')
   const pathInputRef = useRef<HTMLInputElement>(null)
+  const [selectedNames, setSelectedNames] = useState<Set<string>>(new Set())
+  const [renamingFile, setRenamingFile] = useState<string | null>(null)
+  const [renameValue, setRenameValue] = useState('')
+  const renameInputRef = useRef<HTMLInputElement>(null)
+
+  // Marquee (lasso) selection state
+  const contentRef = useRef<HTMLDivElement>(null)
+  const marqueeElRef = useRef<HTMLDivElement>(null)
+  const [marqueeActive, setMarqueeActive] = useState(false)
+  const marqueeRef = useRef<{
+    active: boolean
+    started: boolean
+    originClientX: number
+    originClientY: number
+    baseSelection: Set<string>
+  }>({
+    active: false,
+    started: false,
+    originClientX: 0,
+    originClientY: 0,
+    baseSelection: new Set<string>()
+  })
+  const lastMarqueeSelectionRef = useRef<Set<string>>(new Set())
+
+  // Stable refs for accessing latest values inside event listeners
+  const onStateChangeRef = useRef(onStateChange)
+  onStateChangeRef.current = onStateChange
+  const filesRef = useRef(files)
+  filesRef.current = files
+  const sessionIdRef = useRef(sessionId)
+  sessionIdRef.current = sessionId
+  const settingsRef = useRef(settings)
+  settingsRef.current = settings
+  const onToastRef = useRef(onToast)
+  onToastRef.current = onToast
+
+  // Drag-to-download state
+  const dragFilesRef = useRef<{ files: SFTPFile[]; currentPath: string } | null>(null)
+  const dragStartPosRef = useRef<{ x: number; y: number } | null>(null)
+
+  const notifySelection = useCallback((names: Set<string>) => {
+    if (names.size === 0) {
+      onStateChangeRef.current?.({ selectedFile: null, selectedFiles: [] })
+    } else {
+      const selected = filesRef.current.filter(f => names.has(f.name))
+      onStateChangeRef.current?.({ selectedFile: selected[0] || null, selectedFiles: selected })
+    }
+  }, [])
 
   const fetchDirectory = async (path: string) => {
     setLoading(true)
@@ -23,7 +82,10 @@ export function FileManagerPanel({ sessionId, settings, onClose, onToast }: File
       const res = await window.electronAPI.sftp.ls(sessionId, path)
       if (res.success && res.data) {
         setFiles(res.data)
-        setCurrentPath(path.replace(/\/+/g, '/'))
+        const normalized = path.replace(/\/+/g, '/')
+        setCurrentPath(normalized)
+        setSelectedNames(new Set())
+        onStateChange?.({ currentPath: normalized, selectedFile: null, selectedFiles: [] })
       } else {
         onToast(`读取目录失败: ${res.error}`, 'error')
       }
@@ -38,6 +100,12 @@ export function FileManagerPanel({ sessionId, settings, onClose, onToast }: File
     if (sessionId) {
       fetchDirectory(currentPath)
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId, reloadToken])
+
+  useEffect(() => {
+    setSelectedNames(new Set())
+    onStateChangeRef.current?.({ selectedFile: null, selectedFiles: [] })
   }, [sessionId])
 
   const handleDoubleClick = async (file: SFTPFile) => {
@@ -52,26 +120,33 @@ export function FileManagerPanel({ sessionId, settings, onClose, onToast }: File
     if (file.type === 'd') {
       fetchDirectory(targetPath)
     } else {
-      // Download file
-      let localPath = ''
-      if (settings?.defaultDownloadPath) {
-        localPath = `${settings.defaultDownloadPath}\\${file.name}`
+      // 双击文件：优先打开编辑器
+      if (onEditFile) {
+        onEditFile(targetPath, file.name)
       } else {
-        const res = await window.electronAPI.dialog.selectDirectory()
-        if (res.canceled || !res.filePaths.length) return
-        localPath = `${res.filePaths[0]}\\${file.name}`
-      }
-
-      onToast(`开始下载 ${file.name}...`, 'info')
-      try {
-        const downloadRes = await window.electronAPI.sftp.download(sessionId, targetPath, localPath)
-        if (downloadRes.success) {
-          onToast(`下载成功: ${localPath}`, 'success')
+        // 回退：下载文件
+        let localPath = ''
+        if (settings?.defaultDownloadPath) {
+          // 使用正确的路径分隔符：本地路径使用平台分隔符
+          const sep = settings.defaultDownloadPath.includes('\\') ? '\\' : '/'
+          localPath = `${settings.defaultDownloadPath}${sep}${file.name}`
         } else {
-          onToast(`下载失败: ${downloadRes.error}`, 'error')
+          const res = await window.electronAPI.dialog.selectDirectory()
+          if (res.canceled || !res.filePaths.length) return
+          // selectDirectory 返回的路径使用平台原生分隔符
+          const basePath = res.filePaths[0]
+          const sep = basePath.includes('\\') ? '\\' : '/'
+          localPath = `${basePath}${sep}${file.name}`
         }
-      } catch (err: any) {
-        onToast(`下载异常: ${err.message}`, 'error')
+
+        try {
+          const downloadRes = await window.electronAPI.sftp.download(sessionId, targetPath, localPath)
+          if (!downloadRes.success) {
+            onToast(`下载失败: ${downloadRes.error}`, 'error')
+          }
+        } catch (err: any) {
+          onToast(`下载异常: ${err.message}`, 'error')
+        }
       }
     }
   }
@@ -103,30 +178,44 @@ export function FileManagerPanel({ sessionId, settings, onClose, onToast }: File
     if (items.length === 0) return
 
     for (const file of items) {
-      const localPath = file.path
+      let localPath = file.path
+      if (!localPath) {
+        localPath = window.electronAPI.file.getPathForFile(file) || ''
+      }
+      if (!localPath) {
+        onToast(`上传失败: 无法读取本地路径 (${file.name})`, 'error')
+        continue
+      }
       const remotePath = currentPath.endsWith('/') ? `${currentPath}${file.name}` : `${currentPath}/${file.name}`
-      
-      onToast(`开始上传 ${file.name}...`, 'info')
+
+      // Check if the dropped item is a directory
+      const dirCheck = await window.electronAPI.sftp.isLocalDirectory(localPath)
+      const isDirectory = dirCheck.success && dirCheck.isDirectory
+
       try {
-        const uploadRes = await window.electronAPI.sftp.upload(sessionId, localPath, remotePath)
-        if (uploadRes.success) {
-          onToast(`上传成功: ${file.name}`, 'success')
+        let uploadRes: { success: boolean; error?: string }
+        if (isDirectory) {
+          uploadRes = await window.electronAPI.sftp.uploadDir(sessionId, localPath, remotePath)
         } else {
+          uploadRes = await window.electronAPI.sftp.upload(sessionId, localPath, remotePath)
+        }
+        if (!uploadRes.success) {
           onToast(`上传失败: ${uploadRes.error}`, 'error')
         }
       } catch (err: any) {
         onToast(`上传异常: ${err.message}`, 'error')
       }
     }
-    
+
     // Refresh directory after uploads
     fetchDirectory(currentPath)
   }
 
-  const formatSize = (size: number) => {
-    if (size === 0) return '-'
+  const formatSize = (file: SFTPFile) => {
+    if (file.type === 'd') return '-'
+    if (file.size === 0) return '-'
     const units = ['B', 'KB', 'MB', 'GB']
-    let s = size
+    let s = file.size
     let i = 0
     while (s >= 1024 && i < units.length - 1) {
       s /= 1024
@@ -148,14 +237,245 @@ export function FileManagerPanel({ sessionId, settings, onClose, onToast }: File
     return '📄'
   }
 
+  const startRename = React.useCallback((fileName: string) => {
+    setRenamingFile(fileName)
+    setRenameValue(fileName)
+    setTimeout(() => renameInputRef.current?.select(), 0)
+  }, [])
+
+  const submitRename = async () => {
+    if (!renamingFile || !renameValue.trim() || renameValue === renamingFile) {
+      setRenamingFile(null)
+      return
+    }
+    const oldPath = currentPath.endsWith('/') ? `${currentPath}${renamingFile}` : `${currentPath}/${renamingFile}`
+    const newPath = currentPath.endsWith('/') ? `${currentPath}${renameValue.trim()}` : `${currentPath}/${renameValue.trim()}`
+    try {
+      const res = await window.electronAPI.sftp.rename(sessionId, oldPath, newPath)
+      if (res.success) {
+        onToast(`重命名成功: ${renameValue.trim()}`, 'success')
+        fetchDirectory(currentPath)
+      } else {
+        onToast(`重命名失败: ${res.error}`, 'error')
+      }
+    } catch (err: any) {
+      onToast(`重命名异常: ${err.message}`, 'error')
+    }
+    setRenamingFile(null)
+  }
+
+  useImperativeHandle(ref, () => ({
+    startRename
+  }), [startRename])
+
+  // --- Marquee selection: mousedown on content blank area ---
+  const handleContentMouseDown = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return
+    const target = e.target as HTMLElement
+    // Only start marquee from blank area, not from file rows or interactive elements
+    if (target.closest('.fm-file-row') || target.closest('th') || target.closest('input') || target.closest('button')) return
+
+    const holdCtrl = e.ctrlKey || e.metaKey
+    // Store origin in pure viewport coordinates
+    marqueeRef.current = {
+      active: true,
+      started: false,
+      originClientX: e.clientX,
+      originClientY: e.clientY,
+      baseSelection: holdCtrl ? new Set(selectedNames) : new Set()
+    }
+    lastMarqueeSelectionRef.current = new Set()
+
+    if (!holdCtrl) {
+      setSelectedNames(new Set())
+      notifySelection(new Set())
+    }
+
+    e.preventDefault()
+  }, [selectedNames, notifySelection])
+
+  // --- Marquee selection: document-level mousemove & mouseup ---
+  useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      const ms = marqueeRef.current
+      if (!ms.active) return
+
+      const contentEl = contentRef.current
+      if (!contentEl) return
+      const rect = contentEl.getBoundingClientRect()
+
+      // Clamp mouse position to content area bounds (viewport coords)
+      const cx = Math.max(rect.left, Math.min(e.clientX, rect.right))
+      const cy = Math.max(rect.top, Math.min(e.clientY, rect.bottom))
+
+      // Require minimum drag distance before showing marquee
+      if (!ms.started) {
+        if (Math.abs(cx - ms.originClientX) < MARQUEE_THRESHOLD && Math.abs(cy - ms.originClientY) < MARQUEE_THRESHOLD) return
+        ms.started = true
+        setMarqueeActive(true)  // Only one React state update to enable user-select:none
+      }
+
+      // Marquee rectangle in pure VIEWPORT coordinates
+      const mLeft = Math.min(ms.originClientX, cx)
+      const mTop = Math.min(ms.originClientY, cy)
+      const mRight = Math.max(ms.originClientX, cx)
+      const mBottom = Math.max(ms.originClientY, cy)
+
+      // Update marquee visual directly via ref (avoids React re-render)
+      const el = marqueeElRef.current
+      if (el) {
+        el.style.left = `${mLeft - rect.left + contentEl.scrollLeft}px`
+        el.style.top = `${mTop - rect.top + contentEl.scrollTop}px`
+        el.style.width = `${mRight - mLeft}px`
+        el.style.height = `${mBottom - mTop}px`
+        el.style.display = 'block'
+      }
+
+      // Intersection test in pure viewport coordinates — zero conversion
+      // row.getBoundingClientRect() returns viewport coords natively
+      const rows = contentEl.querySelectorAll('tr[data-filename]')
+      const newSelection = new Set(ms.baseSelection)
+      rows.forEach(row => {
+        const rb = row.getBoundingClientRect()
+        if (mTop < rb.bottom && mBottom > rb.top && mLeft < rb.right && mRight > rb.left) {
+          const filename = row.getAttribute('data-filename')
+          if (filename) newSelection.add(filename)
+        }
+      })
+
+      // Skip re-render if selection hasn't changed
+      const prev = lastMarqueeSelectionRef.current
+      if (newSelection.size === prev.size && [...newSelection].every(n => prev.has(n))) return
+      lastMarqueeSelectionRef.current = newSelection
+
+      setSelectedNames(newSelection)
+      notifySelection(newSelection)
+    }
+
+    const handleMouseUp = () => {
+      if (marqueeRef.current.active) {
+        marqueeRef.current.active = false
+        marqueeRef.current.started = false
+        setMarqueeActive(false)
+        // Hide marquee div via ref (no re-render needed)
+        if (marqueeElRef.current) marqueeElRef.current.style.display = 'none'
+      }
+    }
+
+    document.addEventListener('mousemove', handleMouseMove)
+    document.addEventListener('mouseup', handleMouseUp)
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove)
+      document.removeEventListener('mouseup', handleMouseUp)
+    }
+  }, [notifySelection])
+
+  // --- Drag-to-download: detect drag-to-desktop and trigger download ---
+  // On Windows, Electron may NOT fire 'dragend' when the drop target is outside
+  // the BrowserWindow (e.g. desktop / Explorer). We listen to both 'dragend' and
+  // 'mouseup' (fallback) so the download is always triggered.
+  useEffect(() => {
+    const DRAG_DISTANCE_THRESHOLD = 50
+    let processed = false
+
+    const processDragDownload = async (endX: number | undefined, endY: number | undefined) => {
+      if (processed) return
+      processed = true
+
+      const drag = dragFilesRef.current
+      const startPos = dragStartPosRef.current
+      dragFilesRef.current = null
+      dragStartPosRef.current = null
+
+      if (!drag || !sessionIdRef.current) return
+
+      // Skip if drag distance is too short (accidental click/drag)
+      if (startPos && endX !== undefined && endY !== undefined) {
+        const dist = Math.abs(endX - startPos.x) + Math.abs(endY - startPos.y)
+        if (dist < DRAG_DISTANCE_THRESHOLD) return
+      }
+
+      // Delay to ensure drag operation is fully completed (especially on Windows)
+      await new Promise(resolve => setTimeout(resolve, 150))
+
+      // Determine save directory — always prompt for drag-to-download
+      // since Electron cannot detect the OS-level drop target path
+      const sid = sessionIdRef.current
+      const res = await window.electronAPI.dialog.selectDirectory()
+      if (res.canceled || !res.filePaths.length) return
+      const targetDir = res.filePaths[0]
+
+      const sep = targetDir.includes('\\') ? '\\' : '/'
+      const filesToDownload = drag.files
+      let failCount = 0
+      let lastError = ''
+      for (const file of filesToDownload) {
+        const remotePath = drag.currentPath.endsWith('/') ? `${drag.currentPath}${file.name}` : `${drag.currentPath}/${file.name}`
+        const localPath = `${targetDir}${sep}${file.name}`
+        try {
+          const res = file.type === 'd'
+            ? await window.electronAPI.sftp.downloadDir(sid, remotePath, localPath)
+            : await window.electronAPI.sftp.download(sid, remotePath, localPath)
+          if (!res.success) {
+            failCount++
+            lastError = res.error || '未知错误'
+          }
+        } catch (err: any) {
+          failCount++
+          lastError = err?.message || String(err)
+        }
+      }
+
+      const total = filesToDownload.length
+      const toast = onToastRef.current
+      if (failCount === 0) {
+        toast(`已下载 ${total} 个文件到 ${targetDir}`, 'success')
+      } else if (failCount < total) {
+        toast(`下载完成: ${total - failCount} 成功, ${failCount} 失败${lastError ? ` (${lastError})` : ''}`, 'error')
+      } else {
+        toast(`下载失败${lastError ? `: ${lastError}` : ''}`, 'error')
+      }
+    }
+
+    const handleDragEnd = (e: DragEvent) => {
+      processDragDownload(e.clientX, e.clientY)
+    }
+
+    const handleMouseUp = (e: MouseEvent) => {
+      if (!dragFilesRef.current) return
+      processDragDownload(e.clientX, e.clientY)
+    }
+
+    const handleDragStartGlobal = () => {
+      processed = false
+    }
+
+    document.addEventListener('dragend', handleDragEnd)
+    window.addEventListener('mouseup', handleMouseUp)
+    document.addEventListener('dragstart', handleDragStartGlobal)
+    return () => {
+      document.removeEventListener('dragend', handleDragEnd)
+      window.removeEventListener('mouseup', handleMouseUp)
+      document.removeEventListener('dragstart', handleDragStartGlobal)
+    }
+  }, [])
+
   const pathParts = currentPath.split('/').filter(Boolean)
 
   return (
-    <div 
+    <div
       className={`file-manager-panel ${isDragging ? 'dragging' : ''}`}
+      tabIndex={0}
       onDragOver={onDragOver}
       onDragLeave={onDragLeave}
       onDrop={onDrop}
+      onContextMenu={(e) => {
+        e.preventDefault()
+        e.stopPropagation()
+        setSelectedNames(new Set())
+        notifySelection(new Set())
+        onContextMenuRequest?.(e, { currentPath })
+      }}
     >
       <div className="fm-header">
         {isEditingPath ? (
@@ -182,8 +502,8 @@ export function FileManagerPanel({ sessionId, settings, onClose, onToast }: File
             setIsEditingPath(true)
             setTimeout(() => pathInputRef.current?.select(), 0)
           }}>
-            <span 
-              className="fm-breadcrumb-item" 
+            <span
+              className="fm-breadcrumb-item"
               onClick={() => fetchDirectory('/')}
             >
               🏠 根目录
@@ -191,8 +511,8 @@ export function FileManagerPanel({ sessionId, settings, onClose, onToast }: File
             {pathParts.map((part, i) => (
               <React.Fragment key={i}>
                 <span className="fm-breadcrumb-sep">/</span>
-                <span 
-                  className="fm-breadcrumb-item" 
+                <span
+                  className="fm-breadcrumb-item"
                   onClick={() => handleBreadcrumbClick(i)}
                 >
                   {part}
@@ -216,7 +536,11 @@ export function FileManagerPanel({ sessionId, settings, onClose, onToast }: File
         </div>
       </div>
 
-      <div className="fm-content">
+      <div
+        className={`fm-content${marqueeActive ? ' fm-marqueeing' : ''}`}
+        ref={contentRef}
+        onMouseDown={handleContentMouseDown}
+      >
         <table className="fm-table">
           <thead>
             <tr>
@@ -229,11 +553,48 @@ export function FileManagerPanel({ sessionId, settings, onClose, onToast }: File
           <tbody>
             {files.map(file => {
               const isDraggable = file.name !== '..'
+              const isSelected = selectedNames.has(file.name)
+              const filePath = currentPath.endsWith('/') ? `${currentPath}${file.name}` : `${currentPath}/${file.name}`
+              const isCutTarget = cutFilePaths?.includes(filePath) ?? false
               return (
-                <tr 
-                  key={file.name} 
-                  className="fm-file-row" 
+                <tr
+                  key={file.name}
+                  data-filename={file.name !== '..' ? file.name : undefined}
+                  className={`fm-file-row${isSelected ? ' selected' : ''}${isCutTarget ? ' cut-pending' : ''}`}
                   draggable={isDraggable}
+                  onClick={(e) => {
+                    if (file.name === '..') {
+                      setSelectedNames(new Set())
+                      notifySelection(new Set())
+                    } else if (e.ctrlKey || e.metaKey) {
+                      // Ctrl+click: toggle individual file in multi-selection
+                      const next = new Set(selectedNames)
+                      if (next.has(file.name)) next.delete(file.name)
+                      else next.add(file.name)
+                      setSelectedNames(next)
+                      notifySelection(next)
+                    } else {
+                      // Normal click: select only this file
+                      setSelectedNames(new Set([file.name]))
+                      notifySelection(new Set([file.name]))
+                    }
+                  }}
+                  onContextMenu={(e) => {
+                    e.preventDefault()
+                    e.stopPropagation()
+                    if (file.name !== '..') {
+                      if (!selectedNames.has(file.name)) {
+                        // Right-clicking unselected file: select only this file
+                        setSelectedNames(new Set([file.name]))
+                        notifySelection(new Set([file.name]))
+                      }
+                      // Right-clicking already selected file: keep current selection
+                    } else {
+                      setSelectedNames(new Set())
+                      notifySelection(new Set())
+                    }
+                    onContextMenuRequest?.(e, { currentPath, file: file.name === '..' ? undefined : file })
+                  }}
                   onDragStart={(e) => {
                     if (!isDraggable) {
                       e.preventDefault()
@@ -242,14 +603,36 @@ export function FileManagerPanel({ sessionId, settings, onClose, onToast }: File
                     const remotePath = currentPath.endsWith('/') ? `${currentPath}${file.name}` : `${currentPath}/${file.name}`
                     e.dataTransfer.setData('application/sftp-file', JSON.stringify({ name: file.name, path: remotePath, size: file.size, type: file.type }))
                     e.dataTransfer.effectAllowed = 'copy'
+                    // Record for drag-to-desktop download
+                    const filesToDrag = selectedNames.size > 1
+                      ? files.filter(f => f.name !== '..' && selectedNames.has(f.name))
+                      : [file]
+                    dragFilesRef.current = { files: filesToDrag, currentPath }
+                    dragStartPosRef.current = { x: e.clientX, y: e.clientY }
                   }}
                   onDoubleClick={() => handleDoubleClick(file)}
                 >
                   <td className="td-name">
                     <span className="fm-icon">{getFileIcon(file)}</span>
-                    <span className="fm-filename">{file.name}</span>
+                    {renamingFile === file.name ? (
+                      <input
+                        ref={renameInputRef}
+                        className="fm-rename-input"
+                        value={renameValue}
+                        onChange={(e) => setRenameValue(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') submitRename()
+                          else if (e.key === 'Escape') setRenamingFile(null)
+                        }}
+                        onBlur={() => submitRename()}
+                        autoFocus
+                        onClick={(e) => e.stopPropagation()}
+                      />
+                    ) : (
+                      <span className="fm-filename">{file.name}</span>
+                    )}
                   </td>
-                  <td className="td-size">{formatSize(file.size)}</td>
+                  <td className="td-size">{formatSize(file)}</td>
                   <td className="td-perms">{file.permissions}</td>
                   <td className="td-time">{formatDate(file.modifyTime)}</td>
                 </tr>
@@ -262,7 +645,13 @@ export function FileManagerPanel({ sessionId, settings, onClose, onToast }: File
             )}
           </tbody>
         </table>
-        
+
+        <div
+          ref={marqueeElRef}
+          className="fm-marquee"
+          style={{ display: 'none' }}
+        />
+
         {isDragging && (
           <div className="fm-drop-overlay">
             <div className="fm-drop-message">
@@ -274,4 +663,4 @@ export function FileManagerPanel({ sessionId, settings, onClose, onToast }: File
       </div>
     </div>
   )
-}
+})
