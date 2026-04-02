@@ -345,17 +345,28 @@ export class SSHManager extends EventEmitter {
       await previousMutex // Wait for previous to finish
 
       return await new Promise((resolve, reject) => {
+        let settled = false
+        let execStream: ClientChannel | null = null
+
         // 超时保护：防止断连后 client.exec 回调永不触发导致 mutex 死锁
         const timer = setTimeout(() => {
-          reject(new Error('命令执行超时'))
+          if (!settled) {
+            settled = true
+            // 销毁已打开的 exec stream，防止泄漏
+            if (execStream) { try { execStream.close() } catch {} }
+            reject(new Error('命令执行超时'))
+          }
         }, EXEC_TIMEOUT_MS)
 
         session.client.exec(command, (err, stream) => {
           if (err) {
             clearTimeout(timer)
-            reject(err)
+            if (!settled) { settled = true; reject(err) }
             return
           }
+          execStream = stream
+          if (settled) { try { stream.close() } catch {}; return }
+
           let output = ''
           stream.on('data', (data: Buffer) => {
             output += data.toString('utf-8')
@@ -365,7 +376,7 @@ export class SSHManager extends EventEmitter {
           })
           stream.on('close', () => {
             clearTimeout(timer)
-            resolve(output)
+            if (!settled) { settled = true; resolve(output) }
           })
         })
       })

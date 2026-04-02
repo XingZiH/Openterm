@@ -47,6 +47,7 @@ function CommandBlock({
 }) {
   const [executed, setExecuted] = useState(autoExecuted || false)
   const [expanded, setExpanded] = useState(false)
+  const [rerunConfirm, setRerunConfirm] = useState(false)
   const dangerous = isDangerousCommand(command)
 
   const lines = command.split('\n')
@@ -54,6 +55,17 @@ function CommandBlock({
 
   const handleExecute = () => {
     if (executed) return
+    onExecute(command)
+    setExecuted(true)
+  }
+
+  const handleRerun = () => {
+    if (dangerous && !rerunConfirm) {
+      setRerunConfirm(true)
+      setTimeout(() => setRerunConfirm(false), 3000)
+      return
+    }
+    setRerunConfirm(false)
     onExecute(command)
     setExecuted(true)
   }
@@ -71,7 +83,12 @@ function CommandBlock({
         )}
         <div className="command-block-actions">
           {executed ? (
-            <span className="execute-btn executed">✓ 已执行</span>
+            <>
+              <span className="execute-btn executed">✓ 已执行</span>
+              <button className={`execute-btn rerun${rerunConfirm ? ' rerun-confirm' : ''}`} onClick={handleRerun} title={rerunConfirm ? '再次点击确认执行' : '重新执行'}>
+                {rerunConfirm ? '⚠ 确认?' : '↻'}
+              </button>
+            </>
           ) : (
             <button
               className={`execute-btn ${dangerous ? 'danger' : 'primary'}`}
