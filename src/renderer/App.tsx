@@ -1724,18 +1724,15 @@ export default function App() {
         // 若刚好与 shell 正在发送的 PS1 彩色 prompt（\x1b[33m...~#）撞车，
         // ESC 序列前半被丢弃、parser 归零，后续的 ASCII 尾部（~#）会被当成普通文本渲染，
         // 视觉上残留 "~#" 这样的 prompt 尾巴。clear() 只清渲染/滚动 buffer，不动 parser，安全。
+        //
+        // 仅清本地 xterm buffer，不向 shell 发送任何控制字符（对齐 Windows Terminal / iTerm2 行为）。
+        // 早期实现会额外发送 \x0c (Ctrl+L) 让 shell 重绘 prompt，但在以下场景会被回显为 "^L" 残留：
+        //   1. shell 正在执行前台命令（非 readline 模式，如 cat / tail -f）
+        //   2. 命令行已有未提交输入但 readline 状态异常
+        //   3. 远端 shell 是 sh/dash 等无 readline 的 shell，或 stty 配置异常
+        //   4. 网络抖动导致 \x0c 在 shell 消费前先被回显
+        // xterm.clear() 保留光标所在行作为新的第一行，prompt 与已输入内容均不丢失。
         ref.terminal.clear()
-        // 发送清屏指令给 shell，由 shell 自身 emit 清屏序列 + 重绘 prompt，
-        // xterm parser 在不被打断的情况下完整渲染
-        if (activeSessionId.startsWith('local-')) {
-          if (platform === 'win32') {
-            window.electronAPI.pty.write(activeSessionId, 'cls\r')
-          } else {
-            window.electronAPI.pty.write(activeSessionId, '\x0c')
-          }
-        } else {
-          window.electronAPI.ssh.sendData(activeSessionId, '\x0c')
-        }
         ref.terminal.focus()
       }
     })
