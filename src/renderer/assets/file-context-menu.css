@@ -26,7 +26,7 @@ body,
   height: 100%;
   overflow: hidden;
   background: transparent;
-  font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Microsoft YaHei UI', 'PingFang SC', sans-serif;
 }
 
 .file-context-menu-window {

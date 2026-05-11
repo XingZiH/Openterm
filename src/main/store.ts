@@ -87,9 +87,13 @@ const DEFAULT_SETTINGS: AppSettings = {
   relaxedMode: false
 }
 
+function cloneFromJson<T>(json: string): T {
+  return JSON.parse(json) as T
+}
+
 export class Store {
   private store: any = null
-  private settingsCache: AppSettings | null = null
+  private settingsCacheJson: string | null = null
 
   private async getStore(): Promise<any> {
     if (this.store) return this.store
@@ -133,30 +137,31 @@ export class Store {
 
   async getSettings(): Promise<AppSettings> {
     // 内存缓存：避免每次调用都读取磁盘和解析 JSONC
-    // 返回深拷贝防止外部修改污染缓存
-    if (this.settingsCache) return JSON.parse(JSON.stringify(this.settingsCache))
+    // 统一返回深拷贝，防止外部修改污染缓存
+    if (this.settingsCacheJson) return cloneFromJson<AppSettings>(this.settingsCacheJson)
 
     const store = await this.getStore()
     const base = store.get('settings') as AppSettings
-    // 合并 jsonc 配置覆盖
+    let merged = base
+
+    // 合并 jsonc 配置覆盖（不可变合并，避免修改 store 返回对象）
     try {
       const fileConfig = loadConfig()
-      if (fileConfig.ai) {
-        base.ai = { ...base.ai, ...fileConfig.ai }
-      }
-      const { ai, ...rest } = fileConfig
-      Object.assign(base, rest)
+      const mergedAi = fileConfig.ai ? { ...base.ai, ...fileConfig.ai } : base.ai
+      const { ai: _ignoredAi, ...rest } = fileConfig
+      merged = { ...base, ...rest, ai: mergedAi }
     } catch (err) {
       console.error('[store] Failed to merge config file:', err)
     }
-    this.settingsCache = base
-    return base
+
+    this.settingsCacheJson = JSON.stringify(merged)
+    return cloneFromJson<AppSettings>(this.settingsCacheJson)
   }
 
   async saveSettings(settings: AppSettings): Promise<void> {
     const store = await this.getStore()
     store.set('settings', settings)
-    this.settingsCache = null // 失效缓存
+    this.settingsCacheJson = null // 失效缓存
     // 同步写入 jsonc 配置文件
     try {
       saveConfig(settings)

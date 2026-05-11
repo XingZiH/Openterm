@@ -21,6 +21,7 @@ const FILE_MENU_WIDTH = 236
 const FILE_MENU_ITEM_HEIGHT = 30
 const FILE_MENU_SEPARATOR_HEIGHT = 8
 const FILE_MENU_PADDING = 6
+const MAX_EDIT_FILE_SIZE_TEXT = `${(MAX_EDIT_FILE_SIZE / 1024 / 1024).toFixed(0)}MB`
 
 type FileContextMenuItem = {
   id: string
@@ -49,6 +50,18 @@ let isFileContextMenuLoaded = false
 
 let mainWindow: BrowserWindow | null = null
 
+function sendToMainWindow(channel: string, ...args: any[]): boolean {
+  try {
+    if (!mainWindow || mainWindow.isDestroyed()) return false
+    const webContents = mainWindow.webContents
+    if (!webContents || webContents.isDestroyed()) return false
+    webContents.send(channel, ...args)
+    return true
+  } catch {
+    return false
+  }
+}
+
 // --- File progress helper ---
 type FileProgressEvent = {
   taskId: string
@@ -62,9 +75,7 @@ type FileProgressEvent = {
 }
 
 function sendFileProgress(event: FileProgressEvent) {
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('file-progress', event)
-  }
+  sendToMainWindow('file-progress', event)
 }
 
 // Throttled progress sender: at most once per 100ms per task, but always sends started/completed/error immediately
@@ -385,7 +396,7 @@ ipcMain.on('menu:fileContext:hide', () => {
 ipcMain.on('menu:fileContext:action', (_event, requestId: string, actionId: string) => {
   if (!mainWindow || mainWindow.isDestroyed()) return
   if (!requestId || !actionId) return
-  mainWindow.webContents.send('menu:fileContext:action', requestId, actionId)
+  sendToMainWindow('menu:fileContext:action', requestId, actionId)
   hideFileContextMenuWindow()
 })
 
@@ -447,39 +458,27 @@ ipcMain.on('ssh:resize', (_e, sessionId: string, cols: number, rows: number) => 
 
 // Forward SSH data to renderer
 sshManager.on('data', (sessionId: string, data: string) => {
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('ssh:data', sessionId, data)
-  }
+  sendToMainWindow('ssh:data', sessionId, data)
 })
 
 sshManager.on('close', (sessionId: string) => {
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('ssh:close', sessionId)
-  }
+  sendToMainWindow('ssh:close', sessionId)
 })
 
 sshManager.on('error', (sessionId: string, error: string) => {
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('ssh:error', sessionId, error)
-  }
+  sendToMainWindow('ssh:error', sessionId, error)
 })
 
 sshManager.on('reconnecting', (sessionId: string, info: { attempt: number; maxAttempts: number; nextRetryIn: number }) => {
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('ssh:reconnecting', sessionId, info)
-  }
+  sendToMainWindow('ssh:reconnecting', sessionId, info)
 })
 
 sshManager.on('reconnected', (sessionId: string) => {
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('ssh:reconnected', sessionId)
-  }
+  sendToMainWindow('ssh:reconnected', sessionId)
 })
 
 sshManager.on('reconnectFailed', (sessionId: string, reason: string) => {
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('ssh:reconnectFailed', sessionId, reason)
-  }
+  sendToMainWindow('ssh:reconnectFailed', sessionId, reason)
 })
 
 // --- IPC: AI ---
@@ -505,9 +504,9 @@ ipcMain.handle('ai:chatStream', async (_e, messages: any[], settings: any, strea
   if (!mainWindow) return { success: false, error: 'No window' }
   try {
     await aiService.chatStream(messages, settings, mainWindow, streamId, options)
-    return { success: true }
+    return { success: true, status: 'accepted' as const }
   } catch (err: any) {
-    return { success: false, error: err.message }
+    return { success: false, error: err?.message || String(err) }
   }
 })
 
@@ -939,15 +938,11 @@ ipcMain.handle('pty:kill', (_e, id: string) => {
 
 // Forward local PTY data/exit to renderer
 localPtyManager.on('data', (id: string, data: string) => {
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('pty:data', id, data)
-  }
+  sendToMainWindow('pty:data', id, data)
 })
 
 localPtyManager.on('exit', (id: string, exitCode: number) => {
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('pty:exit', id, exitCode)
-  }
+  sendToMainWindow('pty:exit', id, exitCode)
 })
 
 // --- IPC: Clipboard ---
@@ -961,12 +956,7 @@ ipcMain.handle('sftp:delete', async (_e, sessionId: string, targetPath: string) 
   sendFileProgressThrottled({ taskId, type: 'delete', fileName, status: 'started', progress: -1 })
   try {
     if (sessionId.startsWith('local-')) {
-      const stat = await fsPromises.stat(targetPath)
-      if (stat.isDirectory()) {
-        await fsPromises.rm(targetPath, { recursive: true })
-      } else {
-        await fsPromises.unlink(targetPath)
-      }
+      await localFileManager.delete(targetPath)
     } else {
       await sshManager.exec(sessionId, `rm -rf "${shellEscape(targetPath)}"`)
     }
@@ -982,7 +972,7 @@ ipcMain.handle('sftp:delete', async (_e, sessionId: string, targetPath: string) 
 ipcMain.handle('sftp:rename', async (_e, sessionId: string, oldPath: string, newPath: string) => {
   try {
     if (sessionId.startsWith('local-')) {
-      await fsPromises.rename(oldPath, newPath)
+      await localFileManager.rename(oldPath, newPath)
       return { success: true }
     }
     await sshManager.exec(sessionId, `mv "${shellEscape(oldPath)}" "${shellEscape(newPath)}"`)
@@ -1010,7 +1000,7 @@ ipcMain.handle('sftp:createFile', async (_e, sessionId: string, filePath: string
   try {
     validateFileName(filePath)
     if (sessionId.startsWith('local-')) {
-      await fsPromises.writeFile(filePath, '', { flag: 'wx' })
+      await localFileManager.createFile(filePath)
       return { success: true }
     }
     // 远程先检查是否存在，不存在时才创建（与本地 'wx' 行为一致）
@@ -1034,7 +1024,7 @@ ipcMain.handle('sftp:mkdir', async (_e, sessionId: string, dirPath: string) => {
   try {
     validateFileName(dirPath)
     if (sessionId.startsWith('local-')) {
-      await fsPromises.mkdir(dirPath)
+      await localFileManager.mkdir(dirPath)
       return { success: true }
     }
     await sshManager.exec(sessionId, `mkdir "${shellEscape(dirPath)}"`)
@@ -1081,7 +1071,7 @@ ipcMain.handle('sftp:readFile', async (_e, sessionId: string, filePath: string) 
 
     const metadata = JSON.parse(metadataLine) as RemoteReadFileMetadata
     if (metadata.status === 'too_large') {
-      return { success: false, error: `文件过大 (${(metadata.size / 1024 / 1024).toFixed(1)}MB)，编辑上限为 5MB` }
+      return { success: false, error: `文件过大 (${(metadata.size / 1024 / 1024).toFixed(1)}MB)，编辑上限为 ${MAX_EDIT_FILE_SIZE_TEXT}` }
     }
     if (metadata.status === 'binary') {
       return { success: false, error: '这是一个二进制文件，不支持编辑' }
@@ -1149,7 +1139,7 @@ app.whenReady().then(() => {
     e.preventDefault()
     rendererCleanupDone = false
     if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('window:before-close')
+      sendToMainWindow('window:before-close')
     }
     // renderer 清理完成后会发送 'window:before-close-done'，触发二次 close
   })

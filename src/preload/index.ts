@@ -40,7 +40,11 @@ export interface ElectronAPI {
   ai: {
     testConnection: (settings: any) => Promise<{ success: boolean; error?: string }>
     chat: (messages: any[], settings: any, options?: any) => Promise<{ success: boolean; reply?: string; error?: string }>
-    chatStream: (messages: any[], settings: any, streamId: string, options?: any) => Promise<{ success: boolean; error?: string }>
+    chatStream: (messages: any[], settings: any, streamId: string, options?: any) => Promise<
+      | { success: true; status: 'accepted' }
+      | { success: false; error: string }
+    >
+    onStreamStarted: (callback: (streamId: string) => void) => () => void
     onStreamDelta: (callback: (streamId: string, delta: string) => void) => () => void
     onStreamEnd: (callback: (streamId: string) => void) => () => void
     onStreamError: (callback: (streamId: string, error: string) => void) => () => void
@@ -195,6 +199,11 @@ const api: ElectronAPI = {
     testConnection: (settings) => ipcRenderer.invoke('ai:testConnection', settings),
     chat: (messages, settings, options) => ipcRenderer.invoke('ai:chat', messages, settings, options),
     chatStream: (messages, settings, streamId, options) => ipcRenderer.invoke('ai:chatStream', messages, settings, streamId, options),
+    onStreamStarted: (callback) => {
+      const handler = (_: any, streamId: string) => callback(streamId)
+      ipcRenderer.on('ai:stream:started', handler)
+      return () => ipcRenderer.removeListener('ai:stream:started', handler)
+    },
     onStreamDelta: (callback) => {
       const handler = (_: any, streamId: string, delta: string) => callback(streamId, delta)
       ipcRenderer.on('ai:stream:delta', handler)

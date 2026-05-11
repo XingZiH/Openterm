@@ -29,6 +29,9 @@ import { FileManagerPanel, FileManagerPanelHandle } from './components/FileManag
 import { FileEditorPanel } from './components/FileEditorPanel'
 import { ContextMenu, ContextMenuState, INITIAL_CONTEXT_MENU_STATE, buildTerminalMenuItems, buildFileMenuItems } from './components/ContextMenu'
 import { FileProgressPanel } from './components/FileProgressPanel'
+import { MultiLineExecutionDialog, type MultiLineExecutionItem } from './components/MultiLineExecutionDialog'
+import { parseMultiLineCommands } from './utils/multi-line-parser'
+import { MultiLineExecutor, resolveShellKind, type ShellKind } from './utils/multi-line-executor'
 import { playStepComplete, playStepError, playWorkflowDone, playWorkflowStart } from './utils/workflow-sounds'
 
 // ===========================
@@ -1081,6 +1084,20 @@ export default function App() {
     cancelText?: string
     onConfirm: () => void
   }>({ visible: false, title: '', message: '', onConfirm: () => {} })
+  // 多行粘贴顺序执行状态
+  const [multiLineExec, setMultiLineExec] = useState<{
+    open: boolean
+    sessionId: string
+    shellKind: ShellKind
+    items: MultiLineExecutionItem[]
+    phase: 'idle' | 'running' | 'paused' | 'done' | 'aborted'
+    pauseReason?: 'failed' | 'timeout'
+  } | null>(null)
+  const multiLineExecutorRef = useRef<MultiLineExecutor | null>(null)
+  // 同步 multiLineExec 到 ref，用于在 callback 中读取最新值而无需污染 useCallback deps，
+  // 并避免在 setState reducer 内做副作用（React StrictMode 下 reducer 会调用两次）
+  const multiLineExecStateRef = useRef<typeof multiLineExec>(null)
+  useEffect(() => { multiLineExecStateRef.current = multiLineExec }, [multiLineExec])
   const [promptValue, setPromptValue] = useState('')
   const promptInputRef = useRef<HTMLInputElement>(null)
   const fileMenuActionStateRef = useRef<{ requestId: string; actions: Record<string, () => void> }>({ requestId: '', actions: {} })
@@ -1228,6 +1245,12 @@ export default function App() {
   useEffect(() => {
     if (!window.electronAPI) return
 
+    const removeStarted = window.electronAPI.ai.onStreamStarted((streamId) => {
+      if (streamIdRef.current === streamId) {
+        setStreamingContent('')
+      }
+    })
+
     const removeDelta = window.electronAPI.ai.onStreamDelta((streamId, delta) => {
       if (streamIdRef.current === streamId) {
         setStreamingContent(prev => prev + delta)
@@ -1339,6 +1362,7 @@ export default function App() {
     })
 
     return () => {
+      removeStarted()
       removeDelta()
       removeEnd()
       removeError()
@@ -1492,6 +1516,173 @@ export default function App() {
     setTimeout(() => setToast(null), 3000)
   }
 
+  // --- 多行粘贴顺序执行 ---
+  // 单行直接走原逻辑（sendData / pty.write）；多行打开 Dialog 让用户确认后串行执行
+  const pasteIntoActiveTerminal = useCallback(async () => {
+    if (!activeSessionId) return
+    // 重入保护：Dialog 已打开时拒绝二次粘贴，避免新旧执行器并发
+    if (multiLineExecStateRef.current?.open) {
+      showToast('请先关闭当前的多行执行对话框', 'warning')
+      return
+    }
+    const text = await window.electronAPI.clipboard.readText()
+    if (!text) return
+
+    const { commands, hasMultiple } = parseMultiLineCommands(text)
+    if (!hasMultiple) {
+      // 单行 / 仅识别出一条 → 保持原零摩擦体验
+      if (activeSessionId.startsWith('local-')) {
+        window.electronAPI.pty.write(activeSessionId, text)
+      } else {
+        window.electronAPI.ssh.sendData(activeSessionId, text)
+      }
+      return
+    }
+
+    // 多行：要求会话处于 connected 状态
+    const session = sessions.find(s => s.id === activeSessionId)
+    if (!session || session.status !== 'connected') {
+      showToast('连接尚未就绪，请稍候', 'warning')
+      return
+    }
+
+    setMultiLineExec({
+      open: true,
+      sessionId: activeSessionId,
+      shellKind: resolveShellKind(activeSessionId, platform),
+      items: commands.map<MultiLineExecutionItem>(c => ({ command: c, status: 'pending' })),
+      phase: 'idle',
+    })
+  }, [activeSessionId, sessions, platform])
+
+  const updateMultiLineItem = useCallback((index: number, patch: Partial<MultiLineExecutionItem>) => {
+    setMultiLineExec(prev => {
+      if (!prev) return prev
+      const items = prev.items.slice()
+      items[index] = { ...items[index], ...patch }
+      return { ...prev, items }
+    })
+  }, [])
+
+  const startMultiLineExecution = useCallback(() => {
+    // 副作用必须在 reducer 外执行：StrictMode 下 setState reducer 会被调用两次以检测纯函数性，
+    // 若在 reducer 内 new MultiLineExecutor + start()，会导致执行器被重复创建并 send 两次命令
+    const current = multiLineExecStateRef.current
+    if (!current || current.phase !== 'idle') return  // 防御：仅 idle 可启动
+
+    // 兜底再次检查 session 状态：用户可能在 idle 等待期间会话断连
+    // （session-watch effect 只在 running/paused 介入，idle 不拦截，故此处显式校验）
+    const session = sessions.find(s => s.id === current.sessionId)
+    if (!session || session.status !== 'connected') {
+      showToast('会话已断开，多行执行已取消', 'warning')
+      multiLineExecutorRef.current?.abort()
+      multiLineExecutorRef.current = null
+      setMultiLineExec(null)
+      return
+    }
+
+    const sessionId = current.sessionId
+    const isLocal = sessionId.startsWith('local-')
+
+    const executor = new MultiLineExecutor(
+      current.items.map(it => it.command),
+      current.shellKind,
+      {
+        send: data => {
+          if (isLocal) window.electronAPI.pty.write(sessionId, data)
+          else window.electronAPI.ssh.sendData(sessionId, data)
+        },
+        subscribe: cb => {
+          if (isLocal) {
+            return window.electronAPI.pty.onData((id, chunk) => {
+              if (id === sessionId) cb(chunk)
+            })
+          }
+          return window.electronAPI.ssh.onData((id, chunk) => {
+            if (id === sessionId) cb(chunk)
+          })
+        },
+      },
+      {
+        onItemStart: i => updateMultiLineItem(i, { status: 'running' }),
+        onItemSettled: (i, code) => {
+          if (code === 0) {
+            updateMultiLineItem(i, { status: 'success', exitCode: code })
+          } else {
+            updateMultiLineItem(i, { status: 'failed', exitCode: code })
+          }
+        },
+        onPaused: (i, reason) => {
+          // 失败状态在 onItemSettled 中已更新；超时无 exit code
+          if (reason === 'timeout') {
+            updateMultiLineItem(i, { status: 'timeout' })
+          }
+          setMultiLineExec(p => p ? { ...p, phase: 'paused', pauseReason: reason } : p)
+        },
+        onCompleted: () => {
+          setMultiLineExec(p => p ? { ...p, phase: 'done' } : p)
+        },
+        onAborted: i => {
+          setMultiLineExec(p => {
+            if (!p) return p
+            const items = p.items.slice()
+            // 当前及之后未完成的命令标记为 aborted
+            for (let k = i; k < items.length; k++) {
+              if (items[k].status === 'pending' || items[k].status === 'running') {
+                items[k] = { ...items[k], status: 'aborted' }
+              }
+            }
+            return { ...p, items, phase: 'aborted' }
+          })
+        },
+      },
+    )
+    multiLineExecutorRef.current = executor
+    setMultiLineExec(prev => prev ? { ...prev, phase: 'running', pauseReason: undefined } : prev)
+    executor.start()
+  }, [updateMultiLineItem, sessions])
+
+  const continueMultiLineExecution = useCallback(() => {
+    const executor = multiLineExecutorRef.current
+    if (!executor) return
+    setMultiLineExec(p => p ? { ...p, phase: 'running', pauseReason: undefined } : p)
+    executor.continue()
+  }, [])
+
+  const abortMultiLineExecution = useCallback(() => {
+    multiLineExecutorRef.current?.abort()
+  }, [])
+
+  const closeMultiLineDialog = useCallback(() => {
+    // 防御性 abort：确保未来若通过非按钮路径关闭（unmount / session 切换等），
+    // 仍然反订阅 IPC 监听并停止 setTimeout，避免后台继续 send 命令
+    multiLineExecutorRef.current?.abort()
+    multiLineExecutorRef.current = null
+    setMultiLineExec(null)
+  }, [])
+
+  // 会话断连时主动终止多行执行：避免向已关闭的 stream 写入（触发 ERR_STREAM_WRITE_AFTER_END）
+  // 与 executor 卡 120s 才 timeout 的差体验
+  useEffect(() => {
+    if (!multiLineExec) return
+    // 只在执行中或暂停态主动干预，idle/done/aborted 无意义
+    if (multiLineExec.phase !== 'running' && multiLineExec.phase !== 'paused') return
+    const session = sessions.find(s => s.id === multiLineExec.sessionId)
+    // session 被移除（onClose / onReconnectFailed），或进入 reconnecting/error 等非可写状态
+    if (!session || session.status !== 'connected') {
+      multiLineExecutorRef.current?.abort()
+      showToast('会话已断开，多行执行已停止', 'warning')
+    }
+  }, [sessions, multiLineExec])
+
+  // 组件卸载时清理：防御性 abort，避免遗留的 setTimeout / IPC 监听器
+  useEffect(() => {
+    return () => {
+      multiLineExecutorRef.current?.abort()
+      multiLineExecutorRef.current = null
+    }
+  }, [])
+
   const closeContextMenu = useCallback(() => {
     setContextMenu(INITIAL_CONTEXT_MENU_STATE)
   }, [])
@@ -1525,22 +1716,17 @@ export default function App() {
         if (sel) window.electronAPI.clipboard.writeText(sel)
       },
       onPaste: async () => {
-        const text = await window.electronAPI.clipboard.readText()
-        if (text) {
-          if (activeSessionId.startsWith('local-')) {
-            window.electronAPI.pty.write(activeSessionId, text)
-          } else {
-            window.electronAPI.ssh.sendData(activeSessionId, text)
-          }
-        }
+        await pasteIntoActiveTerminal()
       },
       onSelectAll: () => ref.terminal.selectAll(),
       onClear: () => {
-        // 先 reset 重置终端状态（光标位置、SGR 颜色属性、字符集等），再 clear 清除缓冲区
-        // 不再手动调用 refresh()，避免与后续 shell 回传的 ANSI 清屏序列产生时序竞争
-        ref.terminal.reset()
+        // 不调用 terminal.reset()：reset 会强制重置 xterm 的 ANSI parser 状态机，
+        // 若刚好与 shell 正在发送的 PS1 彩色 prompt（\x1b[33m...~#）撞车，
+        // ESC 序列前半被丢弃、parser 归零，后续的 ASCII 尾部（~#）会被当成普通文本渲染，
+        // 视觉上残留 "~#" 这样的 prompt 尾巴。clear() 只清渲染/滚动 buffer，不动 parser，安全。
         ref.terminal.clear()
-        // 发送清屏指令给 shell，同步清除 PTY 侧缓冲区并触发 prompt 重绘
+        // 发送清屏指令给 shell，由 shell 自身 emit 清屏序列 + 重绘 prompt，
+        // xterm parser 在不被打断的情况下完整渲染
         if (activeSessionId.startsWith('local-')) {
           if (platform === 'win32') {
             window.electronAPI.pty.write(activeSessionId, 'cls\r')
@@ -1593,35 +1779,19 @@ export default function App() {
       // Terminal: Ctrl+Shift+V or Cmd+V to paste
       if (platform === 'darwin' && e.metaKey && e.key === 'v') {
         e.preventDefault()
-        window.electronAPI.clipboard.readText().then(text => {
-          if (text) {
-            if (activeSessionId.startsWith('local-')) {
-              window.electronAPI.pty.write(activeSessionId, text)
-            } else {
-              window.electronAPI.ssh.sendData(activeSessionId, text)
-            }
-          }
-        })
+        pasteIntoActiveTerminal()
         return
       }
       if (platform !== 'darwin' && e.ctrlKey && e.shiftKey && e.key === 'V') {
         e.preventDefault()
-        window.electronAPI.clipboard.readText().then(text => {
-          if (text) {
-            if (activeSessionId.startsWith('local-')) {
-              window.electronAPI.pty.write(activeSessionId, text)
-            } else {
-              window.electronAPI.ssh.sendData(activeSessionId, text)
-            }
-          }
-        })
+        pasteIntoActiveTerminal()
         return
       }
     }
 
     window.addEventListener('keydown', handleKeyDown, true)
     return () => window.removeEventListener('keydown', handleKeyDown, true)
-  }, [activeSessionId, platform])
+  }, [activeSessionId, platform, pasteIntoActiveTerminal])
 
   // --- File manager operation helpers (shared by context menu & keyboard shortcuts) ---
   const fileOps = useMemo(() => {
@@ -2935,11 +3105,11 @@ ${historyStr.slice(-15000)}
       { agentId: activeAgentId, terminalContext: terminalContext || undefined, sessionId: activeSessionId }
     )
 
-    if (!result.success) {
+    if (!result.success || result.status !== 'accepted') {
       setAiLoading(false)
       setStreamingContent('')
       streamIdRef.current = null
-      showToast(`AI 错误: ${result.error}`, 'error')
+      showToast(`AI 错误: ${result.error || '流式任务启动失败'}`, 'error')
     }
     // Note: streaming continues via IPC events (onStreamDelta/onStreamEnd/onStreamError)
   }
@@ -4392,6 +4562,18 @@ ${historyStr.slice(-15000)}
           </div>
         </div>
       )}
+
+      {/* 多行粘贴顺序执行 Dialog */}
+      <MultiLineExecutionDialog
+        open={!!multiLineExec?.open}
+        items={multiLineExec?.items ?? []}
+        phase={multiLineExec?.phase ?? 'idle'}
+        pauseReason={multiLineExec?.pauseReason}
+        onStart={startMultiLineExecution}
+        onContinue={continueMultiLineExecution}
+        onAbort={abortMultiLineExecution}
+        onClose={closeMultiLineDialog}
+      />
 
       {/* Toast */}
       {toast && <div className={`toast ${toast.type}`}>{toast.message}<button className="toast-close" onClick={() => setToast(null)}>✕</button></div>}

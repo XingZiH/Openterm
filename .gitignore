@@ -1,7 +1,7 @@
 # Dependencies
 node_modules/
 
-# Build artifacts (electron-vite / electron-builder)
+# Build artifacts
 out/
 dist/
 release/
@@ -21,15 +21,24 @@ pnpm-debug.log*
 .env.*
 !.env.example
 
-# OS / editor
+# OS
 .DS_Store
 Thumbs.db
+Desktop.ini
+
+# Editors
 .idea/
+.vscode/
+*.swp
+*.swo
 
 # Tool caches
 .ace-tool/
+.codemoss/
 .playwright-mcp/
 
 # Claude worktree cache
 /.claude/worktrees/*
 
+# Temp/generated files
+png/

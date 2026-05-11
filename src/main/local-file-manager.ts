@@ -7,6 +7,7 @@ import { SFTPFile, createParentDirectoryEntry, sortSftpFiles } from '../shared/s
 // 并发 stat 上限，防止打开过多文件描述符
 const STAT_CONCURRENCY = 64
 export const MAX_EDIT_FILE_SIZE = 5 * 1024 * 1024 // 5MB 编辑上限
+const MAX_EDIT_FILE_SIZE_TEXT = `${(MAX_EDIT_FILE_SIZE / 1024 / 1024).toFixed(0)}MB`
 const BINARY_DETECT_BYTES = 8 * 1024 // 8KB 二进制探测窗口
 
 // 目录列表短时缓存（TTL 3秒），避免快速导航时重复 stat
@@ -143,10 +144,39 @@ export class LocalFileManager {
     invalidateLsCache(destPath)
   }
 
+  async delete(targetPath: string): Promise<void> {
+    const stat = await fs.stat(targetPath)
+    if (stat.isDirectory()) {
+      await fs.rm(targetPath, { recursive: true })
+    } else {
+      await fs.unlink(targetPath)
+    }
+    invalidateLsCache(targetPath)
+  }
+
+  async rename(oldPath: string, newPath: string): Promise<void> {
+    await fs.rename(oldPath, newPath)
+    invalidateLsCache(oldPath)
+    invalidateLsCache(newPath)
+  }
+
+  async createFile(filePath: string): Promise<void> {
+    await fs.writeFile(filePath, '', { flag: 'wx' })
+    invalidateLsCache(filePath)
+  }
+
+  async mkdir(dirPath: string): Promise<void> {
+    await fs.mkdir(dirPath)
+    invalidateLsCache(dirPath)
+  }
+
   async readFile(filePath: string): Promise<{ content: string; size: number }> {
     const stat = await fs.stat(filePath)
     if (stat.size > MAX_EDIT_FILE_SIZE) {
-      throw new Error(`文件过大 (${(stat.size / 1024 / 1024).toFixed(1)}MB)，编辑上限为 5MB`)
+      throw new Error(`文件过大 (${(stat.size / 1024 / 1024).toFixed(1)}MB)，编辑上限为 ${MAX_EDIT_FILE_SIZE_TEXT}`)
+    }
+    if (stat.size === 0) {
+      return { content: '', size: 0 }
     }
 
     // 合并 I/O：一次 open，先探测二进制再全量读取，避免重复打开文件
@@ -164,7 +194,15 @@ export class LocalFileManager {
       }
       // 使用同一个 fileHandle 读取全部内容
       const contentBuffer = Buffer.alloc(stat.size)
-      await fileHandle.read(contentBuffer, 0, stat.size, 0)
+      let offset = 0
+      while (offset < stat.size) {
+        const { bytesRead } = await fileHandle.read(contentBuffer, offset, stat.size - offset, offset)
+        if (bytesRead === 0) break
+        offset += bytesRead
+      }
+      if (offset !== stat.size) {
+        throw new Error('读取文件失败：文件内容读取不完整')
+      }
       return { content: contentBuffer.toString('utf-8'), size: stat.size }
     } finally {
       await fileHandle.close()

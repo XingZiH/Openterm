@@ -308,7 +308,11 @@ declare global {
           settings: any,
           streamId: string,
           options?: any
-        ) => Promise<{ success: boolean; error?: string }>
+        ) => Promise<
+          | { success: true; status: 'accepted' }
+          | { success: false; error: string }
+        >
+        onStreamStarted: (callback: (streamId: string) => void) => () => void
         onStreamDelta: (callback: (streamId: string, delta: string) => void) => () => void
         onStreamEnd: (callback: (streamId: string) => void) => () => void
         onStreamError: (callback: (streamId: string, error: string) => void) => () => void
