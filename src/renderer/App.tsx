@@ -1009,6 +1009,15 @@ const TERMINAL_THEMES: Record<string, Record<string, string>> = {
 type Page = 'overview' | 'settings'
 type ViewMode = 'simple' | 'engineering'
 
+const LONG_RUNNING_COMMAND_TIMEOUT_MS = 30 * 60_000
+const LONG_RUNNING_COMMAND_PATTERN = /(^|[;&|()\s])(?:curl|wget|scp|rsync|git\s+clone|gh\s+release\s+download|npm\s+(?:install|ci)|pnpm\s+install|yarn\s+install|bun\s+install|pip\s+install|pip3\s+install|docker\s+pull|docker\s+build|podman\s+pull|podman\s+build)\b/i
+
+function resolveMultiLineCommandTimeout(command: { command: string; raw: string }): number {
+  return LONG_RUNNING_COMMAND_PATTERN.test(command.command) || LONG_RUNNING_COMMAND_PATTERN.test(command.raw)
+    ? LONG_RUNNING_COMMAND_TIMEOUT_MS
+    : 120_000
+}
+
 export default function App() {
   const [page, setPage] = useState<Page>('overview')
   const [connections, setConnections] = useState<ConnectionConfig[]>([])
@@ -1087,11 +1096,14 @@ export default function App() {
   // 多行粘贴顺序执行状态
   const [multiLineExec, setMultiLineExec] = useState<{
     open: boolean
+    viewMode: 'modal' | 'minimized'
     sessionId: string
     shellKind: ShellKind
     items: MultiLineExecutionItem[]
     phase: 'idle' | 'running' | 'paused' | 'done' | 'aborted'
     pauseReason?: 'failed' | 'timeout'
+    activeMode?: 'batch' | 'single'
+    activeIndex?: number
   } | null>(null)
   const multiLineExecutorRef = useRef<MultiLineExecutor | null>(null)
   // 同步 multiLineExec 到 ref，用于在 callback 中读取最新值而无需污染 useCallback deps，
@@ -1516,13 +1528,48 @@ export default function App() {
     setTimeout(() => setToast(null), 3000)
   }
 
+  const writeClipboardText = async (text: string): Promise<void> => {
+    if (window.electronAPI?.clipboard?.writeText) {
+      await window.electronAPI.clipboard.writeText(text)
+      return
+    }
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text)
+      return
+    }
+
+    const textarea = document.createElement('textarea')
+    textarea.value = text
+    textarea.style.position = 'fixed'
+    textarea.style.opacity = '0'
+    document.body.appendChild(textarea)
+    try {
+      textarea.focus()
+      textarea.select()
+      const ok = document.execCommand('copy')
+      if (!ok) throw new Error('copy failed')
+    } finally {
+      document.body.removeChild(textarea)
+    }
+  }
+
+  const copyConnectionHost = async (e: React.MouseEvent<HTMLButtonElement>, host: string) => {
+    e.stopPropagation()
+    try {
+      await writeClipboardText(host)
+      showToast(`已复制 IP：${host}`, 'success')
+    } catch {
+      showToast('复制 IP 失败', 'error')
+    }
+  }
+
   // --- 多行粘贴顺序执行 ---
   // 单行直接走原逻辑（sendData / pty.write）；多行打开 Dialog 让用户确认后串行执行
   const pasteIntoActiveTerminal = useCallback(async () => {
     if (!activeSessionId) return
     // 重入保护：Dialog 已打开时拒绝二次粘贴，避免新旧执行器并发
     if (multiLineExecStateRef.current?.open) {
-      showToast('请先关闭当前的多行执行对话框', 'warning')
+      showToast('已有多行命令任务，请先恢复或关闭后再粘贴', 'warning')
       return
     }
     const text = await window.electronAPI.clipboard.readText()
@@ -1548,9 +1595,10 @@ export default function App() {
 
     setMultiLineExec({
       open: true,
+      viewMode: 'modal',
       sessionId: activeSessionId,
       shellKind: resolveShellKind(activeSessionId, platform),
-      items: commands.map<MultiLineExecutionItem>(c => ({ command: c, status: 'pending' })),
+      items: commands.map<MultiLineExecutionItem>(c => ({ command: c, status: 'pending', runCount: 0 })),
       phase: 'idle',
     })
   }, [activeSessionId, sessions, platform])
@@ -1564,11 +1612,31 @@ export default function App() {
     })
   }, [])
 
+  const createMultiLineHandlers = useCallback((sessionId: string) => {
+    const isLocal = sessionId.startsWith('local-')
+    return {
+      send: (data: string) => {
+        if (isLocal) window.electronAPI.pty.write(sessionId, data)
+        else window.electronAPI.ssh.sendData(sessionId, data)
+      },
+      subscribe: (cb: (chunk: string) => void) => {
+        if (isLocal) {
+          return window.electronAPI.pty.onData((id, chunk) => {
+            if (id === sessionId) cb(chunk)
+          })
+        }
+        return window.electronAPI.ssh.onData((id, chunk) => {
+          if (id === sessionId) cb(chunk)
+        })
+      },
+    }
+  }, [])
+
   const startMultiLineExecution = useCallback(() => {
     // 副作用必须在 reducer 外执行：StrictMode 下 setState reducer 会被调用两次以检测纯函数性，
     // 若在 reducer 内 new MultiLineExecutor + start()，会导致执行器被重复创建并 send 两次命令
     const current = multiLineExecStateRef.current
-    if (!current || current.phase !== 'idle') return  // 防御：仅 idle 可启动
+    if (!current || current.phase === 'running' || current.phase === 'paused') return
 
     // 兜底再次检查 session 状态：用户可能在 idle 等待期间会话断连
     // （session-watch effect 只在 running/paused 介入，idle 不拦截，故此处显式校验）
@@ -1582,29 +1650,21 @@ export default function App() {
     }
 
     const sessionId = current.sessionId
-    const isLocal = sessionId.startsWith('local-')
+    const itemsForRun = current.items.map(it => ({
+      ...it,
+      status: 'pending' as const,
+      exitCode: undefined,
+    }))
 
     const executor = new MultiLineExecutor(
-      current.items.map(it => it.command),
+      itemsForRun.map(it => it.command),
       current.shellKind,
+      createMultiLineHandlers(sessionId),
       {
-        send: data => {
-          if (isLocal) window.electronAPI.pty.write(sessionId, data)
-          else window.electronAPI.ssh.sendData(sessionId, data)
+        onItemStart: i => {
+          updateMultiLineItem(i, { status: 'running', exitCode: undefined, runCount: (itemsForRun[i].runCount ?? 0) + 1, lastRunAt: Date.now() })
+          setMultiLineExec(p => p ? { ...p, activeIndex: i } : p)
         },
-        subscribe: cb => {
-          if (isLocal) {
-            return window.electronAPI.pty.onData((id, chunk) => {
-              if (id === sessionId) cb(chunk)
-            })
-          }
-          return window.electronAPI.ssh.onData((id, chunk) => {
-            if (id === sessionId) cb(chunk)
-          })
-        },
-      },
-      {
-        onItemStart: i => updateMultiLineItem(i, { status: 'running' }),
         onItemSettled: (i, code) => {
           if (code === 0) {
             updateMultiLineItem(i, { status: 'success', exitCode: code })
@@ -1620,9 +1680,11 @@ export default function App() {
           setMultiLineExec(p => p ? { ...p, phase: 'paused', pauseReason: reason } : p)
         },
         onCompleted: () => {
-          setMultiLineExec(p => p ? { ...p, phase: 'done' } : p)
+          multiLineExecutorRef.current = null
+          setMultiLineExec(p => p ? { ...p, phase: 'done', activeMode: undefined, activeIndex: undefined } : p)
         },
         onAborted: i => {
+          multiLineExecutorRef.current = null
           setMultiLineExec(p => {
             if (!p) return p
             const items = p.items.slice()
@@ -1632,25 +1694,93 @@ export default function App() {
                 items[k] = { ...items[k], status: 'aborted' }
               }
             }
-            return { ...p, items, phase: 'aborted' }
+            return { ...p, items, phase: 'aborted', activeMode: undefined, activeIndex: undefined }
           })
         },
       },
+      {
+        resolveCommandTimeoutMs: resolveMultiLineCommandTimeout,
+      },
     )
     multiLineExecutorRef.current = executor
-    setMultiLineExec(prev => prev ? { ...prev, phase: 'running', pauseReason: undefined } : prev)
+    setMultiLineExec(prev => prev ? { ...prev, items: itemsForRun, phase: 'running', pauseReason: undefined, activeMode: 'batch', activeIndex: undefined } : prev)
     executor.start()
-  }, [updateMultiLineItem, sessions])
+  }, [createMultiLineHandlers, updateMultiLineItem, sessions])
 
   const continueMultiLineExecution = useCallback(() => {
     const executor = multiLineExecutorRef.current
     if (!executor) return
-    setMultiLineExec(p => p ? { ...p, phase: 'running', pauseReason: undefined } : p)
+    setMultiLineExec(p => p ? { ...p, phase: 'running', pauseReason: undefined, activeMode: 'batch' } : p)
     executor.continue()
   }, [])
 
+  const runSingleMultiLineItem = useCallback((index: number) => {
+    const current = multiLineExecStateRef.current
+    if (!current || current.phase === 'running' || current.activeMode === 'batch') return
+    if (multiLineExecutorRef.current) {
+      multiLineExecutorRef.current.abort()
+      multiLineExecutorRef.current = null
+    }
+
+    const item = current.items[index]
+    if (!item) return
+
+    const session = sessions.find(s => s.id === current.sessionId)
+    if (!session || session.status !== 'connected') {
+      showToast('会话已断开，无法执行该命令', 'warning')
+      return
+    }
+
+    const sessionId = current.sessionId
+    let pausedBySingleItem = false
+    const executor = new MultiLineExecutor(
+      [item.command],
+      current.shellKind,
+      createMultiLineHandlers(sessionId),
+      {
+        onItemStart: () => {
+          updateMultiLineItem(index, { status: 'running', exitCode: undefined, runCount: (item.runCount ?? 0) + 1, lastRunAt: Date.now() })
+        },
+        onItemSettled: (_i, code) => {
+          updateMultiLineItem(index, { status: code === 0 ? 'success' : 'failed', exitCode: code })
+        },
+        onPaused: (_i, reason) => {
+          pausedBySingleItem = true
+          multiLineExecutorRef.current = null
+          if (reason === 'timeout') updateMultiLineItem(index, { status: 'timeout' })
+          setMultiLineExec(p => p ? { ...p, phase: 'idle', pauseReason: undefined, activeMode: undefined, activeIndex: undefined } : p)
+          executor.abort()
+        },
+        onCompleted: () => {
+          multiLineExecutorRef.current = null
+          setMultiLineExec(p => p ? { ...p, phase: 'idle', pauseReason: undefined, activeMode: undefined, activeIndex: undefined } : p)
+        },
+        onAborted: () => {
+          multiLineExecutorRef.current = null
+          if (!pausedBySingleItem) updateMultiLineItem(index, { status: 'aborted' })
+          setMultiLineExec(p => p ? { ...p, phase: 'idle', pauseReason: undefined, activeMode: undefined, activeIndex: undefined } : p)
+        },
+      },
+      {
+        resolveCommandTimeoutMs: resolveMultiLineCommandTimeout,
+      },
+    )
+
+    multiLineExecutorRef.current = executor
+    setMultiLineExec(p => p ? { ...p, phase: 'running', pauseReason: undefined, activeMode: 'single', activeIndex: index } : p)
+    executor.start()
+  }, [createMultiLineHandlers, updateMultiLineItem, sessions])
+
   const abortMultiLineExecution = useCallback(() => {
     multiLineExecutorRef.current?.abort()
+  }, [])
+
+  const minimizeMultiLineDialog = useCallback(() => {
+    setMultiLineExec(p => p ? { ...p, viewMode: 'minimized' } : p)
+  }, [])
+
+  const restoreMultiLineDialog = useCallback(() => {
+    setMultiLineExec(p => p ? { ...p, viewMode: 'modal' } : p)
   }, [])
 
   const closeMultiLineDialog = useCallback(() => {
@@ -4361,7 +4491,18 @@ ${historyStr.slice(-15000)}
                     </div>
                     <div className="server-card-info">
                       <span className="server-card-detail">
-                        <span className="card-icon">⌘</span> {conn.host}:{conn.port}
+                        <span className="server-card-host">
+                          <span><span className="card-icon">⌘</span> {conn.host}:{conn.port}</span>
+                          <button
+                            className="server-card-copy-ip"
+                            type="button"
+                            title={`复制 IP：${conn.host}`}
+                            aria-label={`复制 IP：${conn.host}`}
+                            onClick={e => copyConnectionHost(e, conn.host)}
+                          >
+                            ⧉
+                          </button>
+                        </span>
                       </span>
                       <span className="server-card-detail">
                         <span className="card-icon">⊙</span> {conn.username}
@@ -4563,13 +4704,19 @@ ${historyStr.slice(-15000)}
       {/* 多行粘贴顺序执行 Dialog */}
       <MultiLineExecutionDialog
         open={!!multiLineExec?.open}
+        viewMode={multiLineExec?.viewMode ?? 'modal'}
         items={multiLineExec?.items ?? []}
         phase={multiLineExec?.phase ?? 'idle'}
         pauseReason={multiLineExec?.pauseReason}
+        activeMode={multiLineExec?.activeMode}
+        activeIndex={multiLineExec?.activeIndex}
         onStart={startMultiLineExecution}
         onContinue={continueMultiLineExecution}
         onAbort={abortMultiLineExecution}
         onClose={closeMultiLineDialog}
+        onMinimize={minimizeMultiLineDialog}
+        onRestore={restoreMultiLineDialog}
+        onRunItem={runSingleMultiLineItem}
       />
 
       {/* Toast */}

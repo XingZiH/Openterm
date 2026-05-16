@@ -161,6 +161,23 @@ describe('MultiLineExecutor', () => {
     expect(exec.getState()).toBe('paused')
   })
 
+  it('uses per-command timeout resolver when provided', () => {
+    const commands = [makeCommand('wget https://example.test/file')]
+    const h = makeHarness()
+    const cb = makeCallbacks()
+    const exec = new MultiLineExecutor(commands, 'bash', h.handlers, cb, {
+      generateMarkerId: () => MARKER_ID,
+      perCommandTimeoutMs: 5_000,
+      resolveCommandTimeoutMs: () => 30_000,
+    })
+    exec.start()
+    vi.advanceTimersByTime(5_000)
+    expect(cb.onPaused).not.toHaveBeenCalled()
+    vi.advanceTimersByTime(25_000)
+    expect(cb.onPaused).toHaveBeenCalledWith(0, 'timeout')
+    expect(exec.getState()).toBe('paused')
+  })
+
   it('parses sentinel even when surrounded by ANSI/extra output', () => {
     const commands = [makeCommand('ls')]
     const h = makeHarness()

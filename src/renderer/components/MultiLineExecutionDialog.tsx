@@ -2,23 +2,31 @@ import { useEffect, useState } from 'react'
 import type { ParsedCommand } from '../utils/multi-line-parser'
 
 export type ItemStatus = 'pending' | 'running' | 'success' | 'failed' | 'timeout' | 'aborted'
+export type MultiLineDialogViewMode = 'modal' | 'minimized'
 
 export interface MultiLineExecutionItem {
   command: ParsedCommand
   status: ItemStatus
   exitCode?: number
+  runCount?: number
+  lastRunAt?: number
 }
 
 interface Props {
   open: boolean
+  viewMode: MultiLineDialogViewMode
   items: MultiLineExecutionItem[]
-  // 主流程状态：idle 表示尚未开始，running/paused/done/aborted 见执行器
   phase: 'idle' | 'running' | 'paused' | 'done' | 'aborted'
   pauseReason?: 'failed' | 'timeout'
+  activeMode?: 'batch' | 'single'
+  activeIndex?: number
   onStart: () => void
   onContinue: () => void
   onAbort: () => void
   onClose: () => void
+  onMinimize: () => void
+  onRestore: () => void
+  onRunItem: (index: number) => void
 }
 
 const STATUS_LABEL: Record<ItemStatus, { icon: string; text: string; className: string }> = {
@@ -52,19 +60,30 @@ function CommandText({ raw }: { raw: string }) {
   )
 }
 
+function getItemActionText(status: ItemStatus): string {
+  if (status === 'success') return '重新执行'
+  if (status === 'failed' || status === 'timeout' || status === 'aborted') return '重试'
+  return '执行'
+}
+
 export function MultiLineExecutionDialog({
   open,
+  viewMode,
   items,
   phase,
   pauseReason,
+  activeMode,
+  activeIndex,
   onStart,
   onContinue,
   onAbort,
   onClose,
+  onMinimize,
+  onRestore,
+  onRunItem,
 }: Props) {
-  // Esc 等价 abort + close
   useEffect(() => {
-    if (!open) return
+    if (!open || viewMode !== 'modal') return
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         if (phase === 'running' || phase === 'paused') onAbort()
@@ -73,29 +92,55 @@ export function MultiLineExecutionDialog({
     }
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
-  }, [open, phase, onAbort, onClose])
+  }, [open, viewMode, phase, onAbort, onClose])
 
   if (!open) return null
 
   const visibleItems = items.slice(0, MAX_VISIBLE_ITEMS)
   const overflow = items.length - visibleItems.length
-
   const totalCount = items.length
   const finishedCount = items.filter(
     it => it.status === 'success' || it.status === 'failed' || it.status === 'timeout' || it.status === 'aborted',
   ).length
+  const isBusy = phase === 'running'
+  const isBatchRunning = isBusy && activeMode === 'batch'
+
+  const phaseText = (() => {
+    if (phase === 'running') return activeMode === 'single' && activeIndex != null ? `第 ${activeIndex + 1} 条执行中` : '顺序执行中'
+    if (phase === 'paused' && pauseReason) return `已暂停（${pauseReason === 'failed' ? '上一条失败' : '上一条超时'}）`
+    if (phase === 'done') return '全部完成'
+    if (phase === 'aborted') return '已停止'
+    return '待执行'
+  })()
 
   const handleOverlayClick = () => {
-    if (phase === 'running') return // 执行中不允许遮罩关闭
+    if (phase === 'running') return
     if (phase === 'paused') onAbort()
     onClose()
+  }
+
+  if (viewMode === 'minimized') {
+    return (
+      <div className={`multi-line-floating ${phase}`}>
+        <div className="multi-line-floating-main">
+          <span className="multi-line-floating-title">多行命令</span>
+          <span className="multi-line-floating-progress">{finishedCount} / {totalCount}</span>
+          <span className="multi-line-floating-phase">{phaseText}</span>
+        </div>
+        <div className="multi-line-floating-actions">
+          <button className="btn btn-secondary" onClick={onRestore}>恢复</button>
+          {phase === 'running' && <button className="btn btn-danger" onClick={onAbort}>停止</button>}
+          <button className="btn btn-secondary" onClick={onClose}>关闭</button>
+        </div>
+      </div>
+    )
   }
 
   return (
     <div className="modal-overlay" onClick={handleOverlayClick}>
       <div
         className="modal-content multi-line-dialog"
-        style={{ width: 560, maxWidth: '90vw' }}
+        style={{ width: 620, maxWidth: '90vw' }}
         onClick={e => e.stopPropagation()}
       >
         <div className="multi-line-dialog-header">
@@ -115,6 +160,10 @@ export function MultiLineExecutionDialog({
               <span className="multi-line-dialog-progress success">全部完成</span>
             )}
           </span>
+          <div className="multi-line-dialog-actions">
+            <button className="multi-line-dialog-icon-btn" type="button" onClick={onMinimize} title="最小化">—</button>
+            <button className="multi-line-dialog-icon-btn" type="button" onClick={onClose} title={phase === 'running' ? '停止并关闭' : '关闭'}>×</button>
+          </div>
         </div>
 
         <div className="multi-line-dialog-body">
@@ -123,14 +172,27 @@ export function MultiLineExecutionDialog({
               const meta = STATUS_LABEL[it.status]
               return (
                 <li key={i} className={`multi-line-item ${meta.className}`}>
-                  <div className="multi-line-item-status">
-                    <span className="multi-line-item-icon">{meta.icon}</span>
-                    <span className="multi-line-item-label">
-                      {meta.text}
-                      {(it.status === 'failed' || it.status === 'timeout') && typeof it.exitCode === 'number' && (
-                        <span className="multi-line-item-exit"> exit={it.exitCode}</span>
-                      )}
-                    </span>
+                  <div className="multi-line-item-status-row">
+                    <div className="multi-line-item-status">
+                      <span className="multi-line-item-icon">{meta.icon}</span>
+                      <span className="multi-line-item-label">
+                        {meta.text}
+                        {(it.status === 'failed' || it.status === 'timeout') && typeof it.exitCode === 'number' && (
+                          <span className="multi-line-item-exit"> exit={it.exitCode}</span>
+                        )}
+                        {!!it.runCount && it.runCount > 1 && (
+                          <span className="multi-line-item-runs">第 {it.runCount} 次</span>
+                        )}
+                      </span>
+                    </div>
+                    <button
+                      className="btn btn-secondary multi-line-item-run"
+                      type="button"
+                      disabled={isBusy || it.status === 'running'}
+                      onClick={() => onRunItem(i)}
+                    >
+                      {getItemActionText(it.status)}
+                    </button>
                   </div>
                   <CommandText raw={it.command.raw} />
                 </li>
@@ -146,20 +208,26 @@ export function MultiLineExecutionDialog({
           {phase === 'idle' && (
             <>
               <button className="btn btn-secondary" onClick={onClose}>取消</button>
-              <button className="btn btn-primary" onClick={onStart}>▶ 顺序执行</button>
+              <button className="btn btn-primary" onClick={onStart} disabled={isBusy}>▶ 顺序执行</button>
             </>
           )}
           {phase === 'running' && (
-            <button className="btn btn-danger" onClick={() => { onAbort(); onClose() }}>■ 停止</button>
+            <>
+              <button className="btn btn-secondary" onClick={onMinimize}>最小化</button>
+              <button className="btn btn-danger" onClick={onAbort}>■ 停止</button>
+            </>
           )}
           {phase === 'paused' && (
             <>
               <button className="btn btn-secondary" onClick={() => { onAbort(); onClose() }}>停止</button>
-              <button className="btn btn-primary" onClick={onContinue}>继续执行</button>
+              <button className="btn btn-primary" onClick={onContinue} disabled={activeMode === 'single' || isBatchRunning}>继续执行</button>
             </>
           )}
           {(phase === 'done' || phase === 'aborted') && (
-            <button className="btn btn-primary" onClick={onClose}>关闭</button>
+            <>
+              <button className="btn btn-secondary" onClick={onStart}>重新顺序执行</button>
+              <button className="btn btn-primary" onClick={onClose}>关闭</button>
+            </>
           )}
         </div>
       </div>

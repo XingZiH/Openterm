@@ -29,6 +29,7 @@ export interface ExecutionCallbacks {
 
 export interface ExecutorOptions {
   perCommandTimeoutMs?: number
+  resolveCommandTimeoutMs?: (command: ParsedCommand, index: number) => number
   // 用于注入 setTimeout/clearTimeout，便于测试使用 fake timers
   scheduler?: {
     setTimeout: (fn: () => void, ms: number) => any
@@ -89,6 +90,7 @@ export class MultiLineExecutor {
   private markerId: string
   private markerRegex: RegExp
   private readonly perCommandTimeoutMs: number
+  private readonly resolveCommandTimeoutMs?: (command: ParsedCommand, index: number) => number
   private readonly scheduler: NonNullable<ExecutorOptions['scheduler']>
 
   constructor(
@@ -99,6 +101,7 @@ export class MultiLineExecutor {
     options: ExecutorOptions = {},
   ) {
     this.perCommandTimeoutMs = options.perCommandTimeoutMs ?? DEFAULT_TIMEOUT_MS
+    this.resolveCommandTimeoutMs = options.resolveCommandTimeoutMs
     this.scheduler = options.scheduler ?? {
       setTimeout: (fn, ms) => setTimeout(fn, ms),
       clearTimeout: handle => clearTimeout(handle),
@@ -145,7 +148,7 @@ export class MultiLineExecutor {
     const cmd = this.commands[this.currentIndex]
     this.callbacks.onItemStart?.(this.currentIndex)
     this.buffer = ''
-    this.armTimeout()
+    this.armTimeout(cmd, this.currentIndex)
 
     const sentinel = buildSentinel(this.shellKind, this.markerId)
     if (isHeredocCommand(cmd)) {
@@ -157,13 +160,14 @@ export class MultiLineExecutor {
     }
   }
 
-  private armTimeout(): void {
+  private armTimeout(command: ParsedCommand, index: number): void {
     this.clearTimeoutHandle()
+    const timeoutMs = this.resolveCommandTimeoutMs?.(command, index) ?? this.perCommandTimeoutMs
     this.timeoutHandle = this.scheduler.setTimeout(() => {
       if (this.state !== 'running') return
       this.state = 'paused'
       this.callbacks.onPaused?.(this.currentIndex, 'timeout')
-    }, this.perCommandTimeoutMs)
+    }, timeoutMs)
   }
 
   private clearTimeoutHandle(): void {
