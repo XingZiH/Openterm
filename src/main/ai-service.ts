@@ -12,7 +12,6 @@
 import { TokenManager } from './token-manager'
 import { ChatCompaction } from './chat-compaction'
 import { AgentManager } from './agent-manager'
-import type { AgentConfig } from './agent-manager'
 import type { BrowserWindow } from 'electron'
 
 export interface AiMessage {
@@ -43,6 +42,79 @@ export interface AiSettings {
 // 重试配置
 const MAX_RETRIES = 3
 const RETRY_BASE_DELAY = 1000 // ms
+
+// --- SSE delta 批量合并发送工具 ---
+// 将高频 delta 合并为 16ms 一次的批量 IPC 发送，减少渲染进程压力
+function safeSend(window: BrowserWindow, channel: string, ...args: any[]): boolean {
+  try {
+    if (window.isDestroyed()) return false
+    const webContents = window.webContents
+    if (!webContents || webContents.isDestroyed()) return false
+    webContents.send(channel, ...args)
+    return true
+  } catch {
+    return false
+  }
+}
+
+function createDeltaBatcher(window: BrowserWindow, streamId: string, onChannelClosed?: () => void) {
+  let buffer = ''
+  let timer: ReturnType<typeof setTimeout> | null = null
+  const BATCH_INTERVAL = 16 // ~60fps
+  let channelClosed = false
+
+  function markClosed() {
+    if (!channelClosed) {
+      channelClosed = true
+      onChannelClosed?.()
+    }
+  }
+
+  function flush(): boolean {
+    timer = null
+    if (!buffer || channelClosed) {
+      return !channelClosed
+    }
+    const ok = safeSend(window, 'ai:stream:delta', streamId, buffer)
+    buffer = ''
+    if (!ok) {
+      markClosed()
+      return false
+    }
+    return true
+  }
+
+  return {
+    push(delta: string): boolean {
+      if (channelClosed) return false
+      buffer += delta
+      if (!timer) {
+        timer = setTimeout(() => {
+          flush()
+        }, BATCH_INTERVAL)
+      }
+      return true
+    },
+    end(): boolean {
+      if (timer) { clearTimeout(timer); timer = null }
+      if (!flush()) return false
+      const ok = safeSend(window, 'ai:stream:end', streamId)
+      if (!ok) {
+        markClosed()
+      }
+      return ok
+    },
+    error(msg: string): boolean {
+      if (timer) { clearTimeout(timer); timer = null }
+      if (buffer && !flush()) return false
+      const ok = safeSend(window, 'ai:stream:error', streamId, msg)
+      if (!ok) {
+        markClosed()
+      }
+      return ok
+    }
+  }
+}
 
 export class AiService {
   private agentManager: AgentManager
@@ -89,7 +161,6 @@ export class AiService {
     options?: { agentId?: string; terminalContext?: string; sessionId?: string }
   ): Promise<string> {
     const agentId = options?.agentId || 'ops'
-    const agent = this.agentManager.getAgent(agentId) || this.agentManager.getDefaultAgent()
 
     // 构建 system prompt
     const systemPrompt = this.agentManager.buildSystemPrompt(
@@ -120,13 +191,13 @@ export class AiService {
           { role: 'system', content: systemPrompt },
           ...result.messages.map(m => ({ role: m.role, content: m.content }))
         ]
-        return this.rawChatWithRetry(compactedFull as AiMessage[], settings, agent)
+        return this.rawChatWithRetry(compactedFull as AiMessage[], settings)
       }
     }
 
     // 智能裁剪适配上下文窗口
     const fitted = TokenManager.fitToContext(fullMessages, settings.model)
-    return this.rawChatWithRetry(fitted as AiMessage[], settings, agent)
+    return this.rawChatWithRetry(fitted as AiMessage[], settings)
   }
 
   /**
@@ -144,7 +215,6 @@ export class AiService {
     }
   ): Promise<void> {
     const agentId = options?.agentId || 'ops'
-    const agent = this.agentManager.getAgent(agentId) || this.agentManager.getDefaultAgent()
 
     const systemPrompt = this.agentManager.buildSystemPrompt(
       agentId,
@@ -168,7 +238,7 @@ export class AiService {
       if (result.compacted) {
         chatMessages = result.messages
         // 发布压缩事件
-        window.webContents.send('ai:compacted', streamId, {
+        safeSend(window, 'ai:compacted', streamId, {
           tokensBefore: result.tokensBefore,
           tokensAfter: result.tokensAfter,
           messagesCompacted: messages.length - result.messages.length
@@ -183,11 +253,10 @@ export class AiService {
 
     const fitted = TokenManager.fitToContext(fullMessages, settings.model)
 
-    try {
-      await this.rawChatStream(fitted as AiMessage[], settings, agent, window, streamId)
-    } catch (err: any) {
-      window.webContents.send('ai:stream:error', streamId, err.message)
-    }
+    void this.rawChatStream(fitted as AiMessage[], settings, window, streamId)
+      .catch((err: any) => {
+        safeSend(window, 'ai:stream:error', streamId, err.message)
+      })
   }
 
   /**
@@ -230,8 +299,7 @@ export class AiService {
    */
   private async rawChatWithRetry(
     messages: AiMessage[],
-    settings: AiSettings,
-    agent: AgentConfig
+    settings: AiSettings
   ): Promise<string> {
     let lastError: Error | null = null
 
@@ -240,8 +308,9 @@ export class AiService {
         return await this.rawChat(messages, settings)
       } catch (err: any) {
         lastError = err
-        // 不重试非 5xx 错误
-        if (err.message?.includes('4')) break
+        // 不重试客户端错误 (4xx)
+        const statusMatch = err.message?.match(/(\d{3})/)
+        if (statusMatch && parseInt(statusMatch[1]) >= 400 && parseInt(statusMatch[1]) < 500) break
         if (attempt < MAX_RETRIES) {
           const delay = RETRY_BASE_DELAY * Math.pow(2, attempt)
           await new Promise(resolve => setTimeout(resolve, delay))
@@ -280,7 +349,6 @@ export class AiService {
   private async rawChatStream(
     messages: AiMessage[],
     settings: AiSettings,
-    agent: AgentConfig,
     window: BrowserWindow,
     streamId: string
   ): Promise<void> {
@@ -409,14 +477,22 @@ export class AiService {
       throw new Error(`API error: ${response.status} - ${errorText}`)
     }
 
+    safeSend(window, 'ai:stream:started', streamId)
+
     if (!response.body) throw new Error('No response body')
 
     const reader = response.body.getReader()
     const decoder = new TextDecoder()
+    let channelClosed = false
 
     // 独立进行后台流式读取，不阻塞当前 IPC 调用返回
     ;(async () => {
       let buffer = ''
+      const batcher = createDeltaBatcher(window, streamId, () => {
+        channelClosed = true
+        void reader.cancel().catch(() => undefined)
+        controller.abort('renderer channel closed')
+      })
       try {
         while (true) {
           const { done, value } = await reader.read()
@@ -431,23 +507,25 @@ export class AiService {
             if (!trimmed || !trimmed.startsWith('data: ')) continue
             const data = trimmed.slice(6)
             if (data === '[DONE]') {
-              window.webContents.send('ai:stream:end', streamId)
+              batcher.end()
               return
             }
             try {
               const parsed = JSON.parse(data)
               const delta = parsed.choices?.[0]?.delta?.content
-              if (delta) {
-                window.webContents.send('ai:stream:delta', streamId, delta)
+              if (delta && !batcher.push(delta)) {
+                return
               }
             } catch {
               // ignore json parse errors
             }
           }
         }
-        window.webContents.send('ai:stream:end', streamId)
+        batcher.end()
       } catch (err: any) {
-        window.webContents.send('ai:stream:error', streamId, err.message)
+        if (!channelClosed) {
+          batcher.error(err.message)
+        }
       }
     })()
   }
@@ -532,11 +610,18 @@ export class AiService {
       throw new Error(`Anthropic API error: ${response.status} - ${errorText}`)
     }
 
+    safeSend(window, 'ai:stream:started', streamId)
+
     if (!response.body) throw new Error('No response body')
 
     const reader = response.body.getReader()
     const decoder = new TextDecoder()
     let buffer = ''
+    let channelClosed = false
+    const batcher = createDeltaBatcher(window, streamId, () => {
+      channelClosed = true
+      void reader.cancel().catch(() => undefined)
+    })
 
     try {
       while (true) {
@@ -553,18 +638,22 @@ export class AiService {
           try {
             const data = JSON.parse(trimmed.slice(6))
             if (data.type === 'content_block_delta' && data.delta?.text) {
-              window.webContents.send('ai:stream:delta', streamId, data.delta.text)
+              if (!batcher.push(data.delta.text)) {
+                return
+              }
             }
             if (data.type === 'message_stop') {
-              window.webContents.send('ai:stream:end', streamId)
+              batcher.end()
               return
             }
           } catch { /* ignore */ }
         }
       }
-      window.webContents.send('ai:stream:end', streamId)
+      batcher.end()
     } catch (err: any) {
-      window.webContents.send('ai:stream:error', streamId, err.message)
+      if (!channelClosed) {
+        batcher.error(err.message)
+      }
     }
   }
 
@@ -615,11 +704,18 @@ export class AiService {
       throw new Error(`Ollama API error: ${response.status} - ${errorText}`)
     }
 
+    safeSend(window, 'ai:stream:started', streamId)
+
     if (!response.body) throw new Error('No response body')
 
     const reader = response.body.getReader()
     const decoder = new TextDecoder()
     let buffer = ''
+    let channelClosed = false
+    const batcher = createDeltaBatcher(window, streamId, () => {
+      channelClosed = true
+      void reader.cancel().catch(() => undefined)
+    })
 
     try {
       while (true) {
@@ -635,18 +731,22 @@ export class AiService {
           try {
             const data = JSON.parse(line)
             if (data.message?.content) {
-              window.webContents.send('ai:stream:delta', streamId, data.message.content)
+              if (!batcher.push(data.message.content)) {
+                return
+              }
             }
             if (data.done) {
-              window.webContents.send('ai:stream:end', streamId)
+              batcher.end()
               return
             }
           } catch { /* ignore */ }
         }
       }
-      window.webContents.send('ai:stream:end', streamId)
+      batcher.end()
     } catch (err: any) {
-      window.webContents.send('ai:stream:error', streamId, err.message)
+      if (!channelClosed) {
+        batcher.error(err.message)
+      }
     }
   }
 }
