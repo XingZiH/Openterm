@@ -168,6 +168,12 @@ export interface AppSettings {
   termScrollback?: number
   termFontFamily?: string
   sidebarCollapsed?: boolean
+  viewMode?: 'simple' | 'engineering'
+  showFileManager?: boolean
+  showAiPanel?: boolean
+  leftPanelWidth?: number
+  rightPanelWidth?: number
+  bottomPanelHeight?: number
   defaultDownloadPath?: string
 }
 

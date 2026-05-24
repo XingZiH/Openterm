@@ -34,6 +34,13 @@ import { parseMultiLineCommands } from './utils/multi-line-parser'
 import { MultiLineExecutor, resolveShellKind, type ShellKind } from './utils/multi-line-executor'
 import { playStepComplete, playStepError, playWorkflowDone, playWorkflowStart } from './utils/workflow-sounds'
 
+const joinLocalDownloadPath = (targetDir: string, fileName: string): string => {
+  const sep = targetDir.includes('\\') ? '\\' : '/'
+  const normalizedDir = targetDir.replace(/[\\/]+$/, '')
+  const dir = normalizedDir || targetDir
+  return `${dir}${dir.endsWith(sep) ? '' : sep}${fileName}`
+}
+
 // ===========================
 // COMPONENT: CommandBlock (memoized)
 // ===========================
@@ -1011,6 +1018,13 @@ type ViewMode = 'simple' | 'engineering'
 
 const LONG_RUNNING_COMMAND_TIMEOUT_MS = 30 * 60_000
 const LONG_RUNNING_COMMAND_PATTERN = /(^|[;&|()\s])(?:curl|wget|scp|rsync|git\s+clone|gh\s+release\s+download|npm\s+(?:install|ci)|pnpm\s+install|yarn\s+install|bun\s+install|pip\s+install|pip3\s+install|docker\s+pull|docker\s+build|podman\s+pull|podman\s+build)\b/i
+const DEFAULT_LEFT_PANEL_WIDTH = 280
+const DEFAULT_RIGHT_PANEL_WIDTH = 280
+const DEFAULT_BOTTOM_PANEL_HEIGHT = 280
+const MIN_MONITOR_PANEL_WIDTH = 220
+const MAX_MONITOR_PANEL_WIDTH = 400
+const MIN_BOTTOM_PANEL_HEIGHT = 120
+const MAX_BOTTOM_PANEL_HEIGHT_RATIO = 0.6
 
 function resolveMultiLineCommandTimeout(command: { command: string; raw: string }): number {
   return LONG_RUNNING_COMMAND_PATTERN.test(command.command) || LONG_RUNNING_COMMAND_PATTERN.test(command.raw)
@@ -1024,10 +1038,16 @@ export default function App() {
   const [sessions, setSessions] = useState<Session[]>([])
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
   const [viewMode, setViewMode] = useState<ViewMode>('simple')
-  const [leftPanelWidth, setLeftPanelWidth] = useState(280)
-  const [rightPanelWidth, setRightPanelWidth] = useState(280)
+  const [leftPanelWidth, setLeftPanelWidth] = useState(DEFAULT_LEFT_PANEL_WIDTH)
+  const [rightPanelWidth, setRightPanelWidth] = useState(DEFAULT_RIGHT_PANEL_WIDTH)
+  const activeSessionForMetrics = sessions.find((s) => s.id === activeSessionId)
   const { metrics: serverMetrics, error: metricsError } = useServerMetrics(
-    viewMode === 'engineering' ? activeSessionId : null
+    viewMode === 'engineering' &&
+      activeSessionForMetrics &&
+      !activeSessionForMetrics.isLocal &&
+      activeSessionForMetrics.status !== 'disconnected'
+      ? activeSessionId
+      : null
   )
   const [showForm, setShowForm] = useState(false)
   const [editingConnection, setEditingConnection] = useState<ConnectionConfig | null>(null)
@@ -1076,6 +1096,7 @@ export default function App() {
   const [showSaveSkillModal, setShowSaveSkillModal] = useState<{ isOpen: boolean; draftSkill?: Partial<AgentSkill> }>({ isOpen: false })
   const [showFileManager, setShowFileManager] = useState(false)
   const [showAiPanel, setShowAiPanel] = useState(true)
+  const [bottomPanelHeight, setBottomPanelHeight] = useState(DEFAULT_BOTTOM_PANEL_HEIGHT)
   // Context menu state
   const [contextMenu, setContextMenu] = useState<ContextMenuState>(INITIAL_CONTEXT_MENU_STATE)
   // Prompt modal state (replaces window.prompt which is blocked in Electron)
@@ -1223,6 +1244,18 @@ export default function App() {
           if (s.termScrollback != null) setTermScrollback(s.termScrollback)
           if (s.termFontFamily) setTermFontFamily(s.termFontFamily)
           if (s.sidebarCollapsed != null) setSidebarCollapsed(s.sidebarCollapsed)
+          if (s.viewMode === 'simple' || s.viewMode === 'engineering') setViewMode(s.viewMode)
+          if (s.showFileManager != null) setShowFileManager(s.showFileManager)
+          if (s.showAiPanel != null) setShowAiPanel(s.showAiPanel)
+          if (typeof s.leftPanelWidth === 'number') {
+            setLeftPanelWidth(Math.max(MIN_MONITOR_PANEL_WIDTH, Math.min(MAX_MONITOR_PANEL_WIDTH, s.leftPanelWidth)))
+          }
+          if (typeof s.rightPanelWidth === 'number') {
+            setRightPanelWidth(Math.max(MIN_MONITOR_PANEL_WIDTH, Math.min(MAX_MONITOR_PANEL_WIDTH, s.rightPanelWidth)))
+          }
+          if (typeof s.bottomPanelHeight === 'number') {
+            setBottomPanelHeight(Math.max(MIN_BOTTOM_PANEL_HEIGHT, Math.min(window.innerHeight * MAX_BOTTOM_PANEL_HEIGHT_RATIO, s.bottomPanelHeight)))
+          }
         }
         // Load chat history
         const history = await window.electronAPI.chatHistory.getAll()
@@ -2046,12 +2079,11 @@ export default function App() {
           targetDir = res.filePaths[0]
         }
 
-        const sep = targetDir.includes('\\') ? '\\' : '/'
         let failCount = 0
         let lastError = ''
         for (const file of filesToDownload) {
           const remotePath = fmCurrentPath.endsWith('/') ? `${fmCurrentPath}${file.name}` : `${fmCurrentPath}/${file.name}`
-          const localPath = `${targetDir}${sep}${file.name}`
+          const localPath = joinLocalDownloadPath(targetDir, file.name)
           try {
             const downloadRes = file.type === 'd'
               ? await window.electronAPI.sftp.downloadDir(activeSessionId, remotePath, localPath)
@@ -2256,12 +2288,11 @@ export default function App() {
           targetDir = res.filePaths[0]
         }
 
-        const sep = targetDir.includes('\\') ? '\\' : '/'
         let failCount = 0
         let lastError = ''
         for (const file of filesToDownload) {
           const remotePath = ctx.currentPath.endsWith('/') ? `${ctx.currentPath}${file.name}` : `${ctx.currentPath}/${file.name}`
-          const localPath = `${targetDir}${sep}${file.name}`
+          const localPath = joinLocalDownloadPath(targetDir, file.name)
           try {
             const downloadRes = file.type === 'd'
               ? await window.electronAPI.sftp.downloadDir(activeSessionId, remotePath, localPath)
@@ -2510,18 +2541,27 @@ export default function App() {
     })
   }, [termFontSize, termLineHeight, termTheme, termCursorStyle, termCursorBlink, termFontFamily, termScrollback, termBgImage, termBgImagePerSession])
 
-  // Auto-save terminal settings when they change
+  // Auto-save terminal and layout settings when they change
   useEffect(() => {
     if (!dataLoadedRef.current) return
-    const updated: AppSettings = {
-      ...settingsRef.current,
-      termFontSize, termLineHeight, termTheme, termCursorStyle,
-      termCursorBlink, termOpacity, termScrollback, termFontFamily,
-      termBgImage, sidebarCollapsed
-    }
-    setSettings(updated)
-    window.electronAPI.store.saveSettings(updated)
-  }, [termFontSize, termLineHeight, termTheme, termCursorStyle, termCursorBlink, termOpacity, termScrollback, termFontFamily, termBgImage, sidebarCollapsed])
+    const timer = setTimeout(() => {
+      const updated: AppSettings = {
+        ...settingsRef.current,
+        termFontSize, termLineHeight, termTheme, termCursorStyle,
+        termCursorBlink, termOpacity, termScrollback, termFontFamily,
+        termBgImage, sidebarCollapsed, viewMode, showFileManager, showAiPanel,
+        leftPanelWidth, rightPanelWidth, bottomPanelHeight
+      }
+      setSettings(updated)
+      void window.electronAPI.store.saveSettings(updated)
+    }, 250)
+    return () => clearTimeout(timer)
+  }, [
+    termFontSize, termLineHeight, termTheme, termCursorStyle, termCursorBlink,
+    termOpacity, termScrollback, termFontFamily, termBgImage, sidebarCollapsed,
+    viewMode, showFileManager, showAiPanel, leftPanelWidth, rightPanelWidth,
+    bottomPanelHeight
+  ])
 
   // Connect to server
   const handleConnect = async (conn: ConnectionConfig) => {
@@ -3249,27 +3289,39 @@ ${historyStr.slice(-15000)}
     const startY = e.clientY
     const panel = chatPanelRef.current
     if (!panel) return
-    const startHeight = panel.offsetHeight
+    const startHeight = panel.offsetHeight || bottomPanelHeight
+    let latestHeight = startHeight
+    let fitFrame: number | null = null
+
+    const scheduleFit = () => {
+      if (fitFrame != null) return
+      fitFrame = requestAnimationFrame(() => {
+        fitFrame = null
+        if (!activeSessionId) return
+        const ref = terminalRefs.current.get(activeSessionId)
+        if (ref) ref.fitAddon.fit()
+      })
+    }
 
     const onMove = (ev: MouseEvent) => {
       if (!resizingRef.current) return
       const delta = startY - ev.clientY
-      const newHeight = Math.max(120, Math.min(window.innerHeight * 0.6, startHeight + delta))
+      const newHeight = Math.max(MIN_BOTTOM_PANEL_HEIGHT, Math.min(window.innerHeight * MAX_BOTTOM_PANEL_HEIGHT_RATIO, startHeight + delta))
+      latestHeight = newHeight
       panel.style.height = `${newHeight}px`
-
-      // Refit terminal
-      if (activeSessionId) {
-        const ref = terminalRefs.current.get(activeSessionId)
-        if (ref) {
-          setTimeout(() => ref.fitAddon.fit(), 10)
-        }
-      }
+      scheduleFit()
     }
 
     const onUp = () => {
       resizingRef.current = false
       document.removeEventListener('mousemove', onMove)
       document.removeEventListener('mouseup', onUp)
+      if (fitFrame != null) {
+        cancelAnimationFrame(fitFrame)
+        fitFrame = null
+      }
+      setBottomPanelHeight(latestHeight)
+      scheduleFit()
     }
 
     document.addEventListener('mousemove', onMove)
@@ -3278,6 +3330,12 @@ ${historyStr.slice(-15000)}
 
   // Current session's messages — keyed by activeChatKey (supports multi-chat per connection)
   const activeSession = sessions.find((s) => s.id === activeSessionId)
+  const isEngineeringLayout =
+    viewMode === 'engineering' &&
+    !!activeSessionId &&
+    !!activeSession &&
+    !activeSession.isLocal &&
+    activeSession.status !== 'disconnected'
   const activeConnectionId = activeSession?.connectionId || null
 
   // Auto-set activeChatKey when switching connections
@@ -3509,7 +3567,14 @@ ${historyStr.slice(-15000)}
               <span className="main-title">{activeSession.name}</span>
               <span className="main-title-sub">
                 {connections.find((c) => c.id === activeSession.connectionId)?.username}@
-                {activeSession.host}
+                <button
+                  type="button"
+                  className="session-title-host-copy"
+                  title={`复制 IP：${activeSession.host}`}
+                  onClick={(e) => copyConnectionHost(e, activeSession.host)}
+                >
+                  {activeSession.host}
+                </button>
               </span>
             </>
           ) : (
@@ -3609,9 +3674,9 @@ ${historyStr.slice(-15000)}
         <div className="terminal-view" style={{ display: activeSessionId && activeSession ? 'flex' : 'none' }}>
           <div className="terminal-main-area">
             {/* Engineering Mode: LEFT Monitor Panel */}
-            {viewMode === 'engineering' && activeSessionId && (
+            {isEngineeringLayout && (
               <>
-                <div className="monitor-panel-wrapper" style={{ width: leftPanelWidth, minWidth: 220, maxWidth: 400 }}>
+                <div className="monitor-panel-wrapper" style={{ width: leftPanelWidth, minWidth: MIN_MONITOR_PANEL_WIDTH, maxWidth: MAX_MONITOR_PANEL_WIDTH }}>
                   <MonitorLeft metrics={serverMetrics} error={metricsError} />
                 </div>
                 <div
@@ -3620,7 +3685,7 @@ ${historyStr.slice(-15000)}
                     e.preventDefault()
                     const startX = e.clientX
                     const startW = leftPanelWidth
-                    const onMove = (ev: MouseEvent) => setLeftPanelWidth(Math.max(220, Math.min(400, startW + (ev.clientX - startX))))
+                    const onMove = (ev: MouseEvent) => setLeftPanelWidth(Math.max(MIN_MONITOR_PANEL_WIDTH, Math.min(MAX_MONITOR_PANEL_WIDTH, startW + (ev.clientX - startX))))
                     const onUp = () => {
                       document.removeEventListener('mousemove', onMove)
                       document.removeEventListener('mouseup', onUp)
@@ -3790,7 +3855,7 @@ ${historyStr.slice(-15000)}
             </div>
 
             {/* Engineering Mode: RIGHT Monitor Panel */}
-            {viewMode === 'engineering' && activeSessionId && (
+            {isEngineeringLayout && (
               <>
                 <div
                   className="panel-divider"
@@ -3798,7 +3863,7 @@ ${historyStr.slice(-15000)}
                     e.preventDefault()
                     const startX = e.clientX
                     const startW = rightPanelWidth
-                    const onMove = (ev: MouseEvent) => setRightPanelWidth(Math.max(220, Math.min(400, startW - (ev.clientX - startX))))
+                    const onMove = (ev: MouseEvent) => setRightPanelWidth(Math.max(MIN_MONITOR_PANEL_WIDTH, Math.min(MAX_MONITOR_PANEL_WIDTH, startW - (ev.clientX - startX))))
                     const onUp = () => {
                       document.removeEventListener('mousemove', onMove)
                       document.removeEventListener('mouseup', onUp)
@@ -3808,7 +3873,7 @@ ${historyStr.slice(-15000)}
                     document.addEventListener('mouseup', onUp)
                   }}
                 />
-                <div className="monitor-panel-wrapper right" style={{ width: rightPanelWidth, minWidth: 220, maxWidth: 400 }}>
+                <div className="monitor-panel-wrapper right" style={{ width: rightPanelWidth, minWidth: MIN_MONITOR_PANEL_WIDTH, maxWidth: MAX_MONITOR_PANEL_WIDTH }}>
                   <MonitorRight metrics={serverMetrics} error={metricsError} />
                 </div>
               </>
@@ -3827,7 +3892,7 @@ ${historyStr.slice(-15000)}
               <div 
                 className="bottom-panels-wrapper" 
                 ref={chatPanelRef} 
-                style={{ display: 'flex', flexDirection: 'row', minHeight: 120, height: 280, borderTop: '1px solid rgba(255,255,255,0.08)', backgroundColor: 'var(--bg-primary, #0d1117)', overflow: 'hidden' }}
+                style={{ display: 'flex', flexDirection: 'row', minHeight: MIN_BOTTOM_PANEL_HEIGHT, height: bottomPanelHeight, borderTop: '1px solid rgba(255,255,255,0.08)', backgroundColor: 'var(--bg-primary, #0d1117)', overflow: 'hidden' }}
               >
                 {/* 1. File Manager Panel (Left) */}
                 {showFileManager && (

@@ -1,5 +1,5 @@
 import { app, BrowserWindow, ipcMain, shell, safeStorage, dialog, clipboard, screen } from 'electron'
-import { join, dirname, basename, extname } from 'path'
+import { join, dirname, basename, extname, parse } from 'path'
 import { promises as fsPromises } from 'fs'
 import { cp as fsCp } from 'fs/promises'
 import { exec } from 'child_process'
@@ -120,6 +120,20 @@ function extractFileName(filePath: string): string {
 
 // Generate a unique local path by appending (1), (2), ... if the file already exists
 // expectedType: 'file' 时若已存在同名目录也视为冲突，'directory' 时若已存在同名文件也视为冲突
+function isRootPath(targetPath: string): boolean {
+  const parsed = parse(targetPath)
+  return targetPath === parsed.root
+}
+
+async function ensureDirectory(targetPath: string): Promise<void> {
+  if (isRootPath(targetPath)) return
+  await fsPromises.mkdir(targetPath, { recursive: true })
+}
+
+async function ensureParentDirectory(targetPath: string): Promise<void> {
+  await ensureDirectory(dirname(targetPath))
+}
+
 async function getUniqueLocalPath(targetPath: string, expectedType?: 'file' | 'directory'): Promise<string> {
   const getPathKind = async (p: string): Promise<'missing' | 'file' | 'directory' | 'other'> => {
     try {
@@ -182,8 +196,8 @@ function createFileContextMenuWindow(): BrowserWindow {
     fullscreenable: false,
     skipTaskbar: true,
     focusable: true,
-    transparent: true,
-    backgroundColor: '#00000000',
+    transparent: false,
+    backgroundColor: '#141821',
     parent: mainWindow ?? undefined,
     hasShadow: true,
     webPreferences: {
@@ -217,15 +231,14 @@ function createFileContextMenuWindow(): BrowserWindow {
     fileContextMenuWindow.loadFile(join(__dirname, '../renderer/file-context-menu.html'))
   }
 
-  fileContextMenuWindow.webContents.once('did-finish-load', () => {
-    isFileContextMenuLoaded = true
-    if (pendingFileContextMenuPayload && fileContextMenuWindow && !fileContextMenuWindow.isDestroyed()) {
-      fileContextMenuWindow.webContents.send('menu:fileContext:render', pendingFileContextMenuPayload)
-      pendingFileContextMenuPayload = null
-    }
-  })
-
   return fileContextMenuWindow
+}
+
+function showFileContextMenuWindow(): void {
+  if (fileContextMenuWindow && !fileContextMenuWindow.isDestroyed()) {
+    fileContextMenuWindow.showInactive()
+    fileContextMenuWindow.focus()
+  }
 }
 
 function hideFileContextMenuWindow(): void {
@@ -373,15 +386,14 @@ ipcMain.handle('menu:fileContext:open', async (event, payload: {
     )
 
     const renderPayload: FileContextMenuRenderPayload = { requestId, items }
+    windowRef.setBounds({ x: boundedX, y: boundedY, width: FILE_MENU_WIDTH, height }, false)
+
     if (isFileContextMenuLoaded && !windowRef.webContents.isLoading()) {
       windowRef.webContents.send('menu:fileContext:render', renderPayload)
+      showFileContextMenuWindow()
     } else {
       pendingFileContextMenuPayload = renderPayload
     }
-
-    windowRef.setBounds({ x: boundedX, y: boundedY, width: FILE_MENU_WIDTH, height }, false)
-    windowRef.showInactive()
-    windowRef.focus()
 
     return { success: true }
   } catch (err: any) {
@@ -405,6 +417,7 @@ ipcMain.on('menu:fileContext:ready', () => {
   if (pendingFileContextMenuPayload && fileContextMenuWindow && !fileContextMenuWindow.isDestroyed()) {
     fileContextMenuWindow.webContents.send('menu:fileContext:render', pendingFileContextMenuPayload)
     pendingFileContextMenuPayload = null
+    showFileContextMenuWindow()
   }
 })
 
@@ -629,7 +642,7 @@ ipcMain.handle('sftp:download', async (_e, sessionId: string, remotePath: string
   sendFileProgressThrottled({ taskId, type: 'download', fileName, status: 'started', progress: 0 })
   try {
     // Ensure parent directory exists before downloading
-    await fsPromises.mkdir(dirname(uniquePath), { recursive: true })
+    await ensureParentDirectory(uniquePath)
 
     const onProgress = (transferred: number, total: number) => {
       const pct = total > 0 ? Math.round((transferred / total) * 100) : -1
@@ -792,7 +805,7 @@ ipcMain.handle('sftp:downloadDir', async (_e, sessionId: string, remotePath: str
     if (isLocal) {
       // Local session: use fs.cp for recursive copy
       totalFiles = await countRemoteFiles(remotePath)
-      await fsPromises.mkdir(uniquePath, { recursive: true })
+      await ensureDirectory(uniquePath)
       sendFileProgressThrottled({ taskId, type: 'downloadDir', fileName: dirName, status: 'progress', progress: 0, totalBytes: totalFiles, transferredBytes: 0 })
 
       // Use recursive cp for local-to-local (much faster)
@@ -804,7 +817,7 @@ ipcMain.handle('sftp:downloadDir', async (_e, sessionId: string, remotePath: str
       sendFileProgressThrottled({ taskId, type: 'downloadDir', fileName: dirName, status: 'progress', progress: 0, totalBytes: totalFiles, transferredBytes: 0 })
 
       const downloadDirRecursive = async (remoteDir: string, localDir: string) => {
-        await fsPromises.mkdir(localDir, { recursive: true })
+        await ensureDirectory(localDir)
 
         const list = await sshManager.sftpLs(sessionId, remoteDir)
         const dirs: typeof list = []

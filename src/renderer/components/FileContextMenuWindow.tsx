@@ -59,11 +59,11 @@ export function FileContextMenuWindow() {
   }, [activeIndex])
 
   useEffect(() => {
-    window.electronAPI.nativeMenu.notifyFileContextReady()
     const offRender = window.electronAPI.nativeMenu.onFileContextRender((nextPayload) => {
       itemRefs.current = []
       setPayload(nextPayload)
     })
+    window.electronAPI.nativeMenu.notifyFileContextReady()
 
     return () => {
       offRender()

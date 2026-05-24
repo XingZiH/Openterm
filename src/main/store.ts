@@ -43,6 +43,7 @@ export interface AppSettings {
     activeProfile?: string
   }
   relaxedMode: boolean
+  workflowMode: boolean
   termBgImage?: string | null
   termFontSize?: number
   termLineHeight?: number
@@ -53,6 +54,12 @@ export interface AppSettings {
   termScrollback?: number
   termFontFamily?: string
   sidebarCollapsed?: boolean
+  viewMode?: 'simple' | 'engineering'
+  showFileManager?: boolean
+  showAiPanel?: boolean
+  leftPanelWidth?: number
+  rightPanelWidth?: number
+  bottomPanelHeight?: number
   defaultDownloadPath?: string
 }
 
@@ -84,7 +91,8 @@ const DEFAULT_SETTINGS: AppSettings = {
     maxTokens: 4096,
     topP: 1
   },
-  relaxedMode: false
+  relaxedMode: false,
+  workflowMode: true
 }
 
 function cloneFromJson<T>(json: string): T {
@@ -141,7 +149,12 @@ export class Store {
     if (this.settingsCacheJson) return cloneFromJson<AppSettings>(this.settingsCacheJson)
 
     const store = await this.getStore()
-    const base = store.get('settings') as AppSettings
+    const stored = (store.get('settings') || {}) as Partial<AppSettings>
+    const base: AppSettings = {
+      ...DEFAULT_SETTINGS,
+      ...stored,
+      ai: { ...DEFAULT_SETTINGS.ai, ...(stored.ai || {}) }
+    }
     let merged = base
 
     // 合并 jsonc 配置覆盖（不可变合并，避免修改 store 返回对象）

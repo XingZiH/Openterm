@@ -508,6 +508,22 @@ body {
   font-family: var(--font-mono);
 }
 
+.session-title-host-copy {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  padding: 0;
+  cursor: copy;
+  -webkit-app-region: no-drag;
+  user-select: text;
+}
+
+.session-title-host-copy:hover {
+  color: var(--accent-blue);
+  text-decoration: underline;
+}
+
 .titlebar-actions {
   margin-left: auto;
   display: flex;
